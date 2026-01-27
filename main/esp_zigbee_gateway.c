@@ -29,6 +29,9 @@
 #include "esp_zigbee_gateway.h"
 #include "zb_config_platform.h"
 
+#include "gw_core/device_registry.h"
+#include "gw_http/gw_http.h"
+
 static const char *TAG = "ESP_ZB_GATEWAY";
 
 /* Note: Please select the correct console output port based on the development board in menuconfig */
@@ -176,6 +179,8 @@ void app_main(void)
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+    ESP_ERROR_CHECK(gw_device_registry_init());
+    ESP_ERROR_CHECK(gw_http_start());
 #if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
     ESP_ERROR_CHECK(esp_zb_gateway_console_init());
 #endif
