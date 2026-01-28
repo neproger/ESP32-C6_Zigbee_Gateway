@@ -7,3 +7,11 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 # "Trim" the build. Include the minimal set of components, main, and anything it depends on.
 idf_build_set_property(MINIMAL_BUILD ON)
 project(esp32-c6_ZBGW)
+
+# Web UI (SPIFFS image)
+#
+# If `web/dist` exists, it will be packed into the `www` SPIFFS partition at build time.
+# Flash together with firmware using `idf.py flash` (image is included via FLASH_IN_PROJECT).
+if(EXISTS "${CMAKE_SOURCE_DIR}/web/dist/index.html")
+    spiffs_create_partition_image(www "${CMAKE_SOURCE_DIR}/web/dist" FLASH_IN_PROJECT)
+endif()

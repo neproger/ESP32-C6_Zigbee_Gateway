@@ -29,6 +29,7 @@
 #include "zb_config_platform.h"
 
 #include "gw_wifi.h"
+#include "gw_zigbee/gw_zigbee.h"
 #include "gw_core/device_registry.h"
 #include "gw_http/gw_http.h"
 
@@ -113,6 +114,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
     case ESP_ZB_ZDO_SIGNAL_DEVICE_ANNCE:
         dev_annce_params = (esp_zb_zdo_signal_device_annce_params_t *)esp_zb_app_signal_get_params(p_sg_p);
         ESP_LOGI(TAG, "New device commissioned or rejoined (short: 0x%04hx)", dev_annce_params->device_short_addr);
+        gw_zigbee_on_device_annce(dev_annce_params->ieee_addr, dev_annce_params->device_short_addr, dev_annce_params->capability);
         break;
     case ESP_ZB_NWK_SIGNAL_PERMIT_JOIN_STATUS:
         if (err_status == ESP_OK) {

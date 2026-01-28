@@ -1,13 +1,12 @@
 idf_component_register(
     SRCS
-        "src/gw_http.c"
+        "src/gw_zigbee.c"
     INCLUDE_DIRS
         "include"
     PRIV_REQUIRES
-        esp_http_server
         log
-        spiffs
+        esp_timer
         gw_core
-        gw_zigbee
+        espressif__esp-zigbee-lib
 )
 

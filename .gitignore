@@ -78,3 +78,7 @@ main/wifi_aps_config.h
 *.workspace # General workspace files, can be from various tools
 *.suo       # Visual Studio Solution User Options
 *.sln.docstates # Visual Studio
+
+# Web UI (React/Vite)
+web/node_modules/
+web/dist/

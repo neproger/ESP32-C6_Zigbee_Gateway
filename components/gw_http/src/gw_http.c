@@ -1,107 +1,185 @@
 #include "gw_http/gw_http.h"
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "esp_spiffs.h"
 
 #include "gw_core/device_registry.h"
+#include "gw_zigbee/gw_zigbee.h"
 
 static const char *TAG = "gw_http";
 
 static httpd_handle_t s_server;
 static uint16_t s_server_port;
+static bool s_spiffs_mounted;
 
-static const char *INDEX_HTML =
-    "<!doctype html>\n"
-    "<html lang=\"ru\">\n"
-    "<head>\n"
-    "  <meta charset=\"utf-8\"/>\n"
-    "  <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"/>\n"
-    "  <title>Zigbee Gateway</title>\n"
-    "  <style>\n"
-    "    body{font-family:system-ui,Segoe UI,Arial,sans-serif;margin:16px;max-width:980px}\n"
-    "    h1{font-size:20px;margin:0 0 12px}\n"
-    "    .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}\n"
-    "    button{padding:8px 12px;cursor:pointer}\n"
-    "    table{width:100%;border-collapse:collapse;margin-top:12px}\n"
-    "    th,td{border-bottom:1px solid #ddd;padding:8px;text-align:left;font-size:14px}\n"
-    "    code{background:#f6f6f6;padding:2px 4px;border-radius:4px}\n"
-    "    .muted{color:#666;font-size:13px}\n"
-    "    form{margin-top:16px;padding:12px;border:1px solid #ddd;border-radius:8px}\n"
-    "    input{padding:8px;min-width:220px}\n"
-    "    label{display:block;margin:8px 0 4px}\n"
-    "  </style>\n"
-    "</head>\n"
-    "<body>\n"
-    "  <h1>ESP32‑C6 Zigbee Gateway</h1>\n"
-    "  <div class=\"row\">\n"
-    "    <button onclick=\"loadDevices()\">Обновить список</button>\n"
-    "    <span class=\"muted\">Устройства берутся из реестра прошивки (пока без Zigbee‑интервью).</span>\n"
-    "  </div>\n"
-    "  <table>\n"
-    "    <thead><tr><th>UID</th><th>Имя</th><th>Short</th><th>Caps</th></tr></thead>\n"
-    "    <tbody id=\"tbody\"></tbody>\n"
-    "  </table>\n"
-    "\n"
-    "  <form onsubmit=\"return addDevice(event)\">\n"
-    "    <div class=\"muted\">Временная форма для теста UI (ручное добавление в реестр).</div>\n"
-    "    <label>device_uid (пример: <code>0x00124B0012345678</code>)</label>\n"
-    "    <input id=\"uid\" value=\"0x00124B0012345678\"/>\n"
-    "    <label>name</label>\n"
-    "    <input id=\"name\" value=\"Device\"/>\n"
-    "    <div class=\"row\" style=\"margin-top:10px\">\n"
-    "      <label style=\"margin:0\"><input type=\"checkbox\" id=\"cap_onoff\" checked/> onoff</label>\n"
-    "      <label style=\"margin:0\"><input type=\"checkbox\" id=\"cap_button\"/> button</label>\n"
-    "    </div>\n"
-    "    <div class=\"row\" style=\"margin-top:10px\">\n"
-    "      <button type=\"submit\">Добавить/обновить</button>\n"
-    "    </div>\n"
-    "  </form>\n"
-    "\n"
-    "  <script>\n"
-    "    async function loadDevices(){\n"
-    "      const r = await fetch('/api/devices');\n"
-    "      const items = await r.json();\n"
-    "      const tbody = document.getElementById('tbody');\n"
-    "      tbody.innerHTML='';\n"
-    "      for(const d of items){\n"
-    "        const caps=[];\n"
-    "        if(d.has_onoff) caps.push('onoff');\n"
-    "        if(d.has_button) caps.push('button');\n"
-    "        const tr=document.createElement('tr');\n"
-    "        tr.innerHTML = `<td><code>${d.device_uid}</code></td><td>${d.name||''}</td><td><code>0x${(d.short_addr||0).toString(16)}</code></td><td>${caps.join(', ')}</td>`;\n"
-    "        tbody.appendChild(tr);\n"
-    "      }\n"
-    "    }\n"
-    "    async function addDevice(e){\n"
-    "      e.preventDefault();\n"
-    "      const uid=document.getElementById('uid').value;\n"
-    "      const name=document.getElementById('name').value;\n"
-    "      const onoff=document.getElementById('cap_onoff').checked ? '1' : '0';\n"
-    "      const button=document.getElementById('cap_button').checked ? '1' : '0';\n"
-    "      const q=new URLSearchParams({uid,name,onoff,button});\n"
-    "      await fetch('/api/devices?'+q.toString(), {method:'POST'});\n"
-    "      await loadDevices();\n"
-    "      return false;\n"
-    "    }\n"
-    "    loadDevices();\n"
-    "  </script>\n"
-    "</body>\n"
-    "</html>\n";
+static esp_err_t gw_http_spiffs_init(void)
+{
+    if (s_spiffs_mounted) {
+        return ESP_OK;
+    }
+
+    esp_vfs_spiffs_conf_t conf = {
+        .base_path = "/www",
+        .partition_label = "www",
+        .max_files = 8,
+        .format_if_mount_failed = true,
+    };
+
+    esp_err_t err = esp_vfs_spiffs_register(&conf);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "SPIFFS mount failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    size_t total = 0;
+    size_t used = 0;
+    err = esp_spiffs_info(conf.partition_label, &total, &used);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "SPIFFS mounted (%s): total=%u used=%u", conf.partition_label, (unsigned)total, (unsigned)used);
+    }
+
+    s_spiffs_mounted = true;
+    return ESP_OK;
+}
+
+static const char *gw_http_content_type_from_path(const char *path)
+{
+    const char *ext = strrchr(path, '.');
+    if (ext == NULL) {
+        return "text/plain";
+    }
+    if (strcmp(ext, ".html") == 0) return "text/html; charset=utf-8";
+    if (strcmp(ext, ".js") == 0) return "application/javascript";
+    if (strcmp(ext, ".css") == 0) return "text/css";
+    if (strcmp(ext, ".svg") == 0) return "image/svg+xml";
+    if (strcmp(ext, ".json") == 0) return "application/json";
+    if (strcmp(ext, ".png") == 0) return "image/png";
+    if (strcmp(ext, ".ico") == 0) return "image/x-icon";
+    if (strcmp(ext, ".map") == 0) return "application/json";
+    return "application/octet-stream";
+}
+
+static bool gw_http_uri_looks_like_asset(const char *uri)
+{
+    const char *slash = strrchr(uri, '/');
+    const char *dot = strrchr(uri, '.');
+    return (dot != NULL && (slash == NULL || dot > slash));
+}
+
+static esp_err_t gw_http_send_spiffs_file(httpd_req_t *req, const char *uri_path)
+{
+    if (!s_spiffs_mounted) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "web fs not mounted");
+        return ESP_OK;
+    }
+
+    char fullpath[256];
+    int n = snprintf(fullpath, sizeof(fullpath), "/www%s", uri_path);
+    if (n <= 0 || n >= (int)sizeof(fullpath)) {
+        httpd_resp_send_err(req, HTTPD_414_URI_TOO_LONG, "path too long");
+        return ESP_OK;
+    }
+
+    FILE *f = fopen(fullpath, "rb");
+    if (f == NULL) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "not found");
+        return ESP_OK;
+    }
+
+    httpd_resp_set_type(req, gw_http_content_type_from_path(fullpath));
+
+    uint8_t buf[1024];
+    while (true) {
+        size_t r = fread(buf, 1, sizeof(buf), f);
+        if (r > 0) {
+            esp_err_t err = httpd_resp_send_chunk(req, (const char *)buf, (ssize_t)r);
+            if (err != ESP_OK) {
+                fclose(f);
+                httpd_resp_send_chunk(req, NULL, 0);
+                return err;
+            }
+        }
+        if (r < sizeof(buf)) {
+            break;
+        }
+    }
+
+    fclose(f);
+    return httpd_resp_send_chunk(req, NULL, 0);
+}
 
 static esp_err_t index_get_handler(httpd_req_t *req)
 {
-    httpd_resp_set_type(req, "text/html; charset=utf-8");
-    return httpd_resp_send(req, INDEX_HTML, HTTPD_RESP_USE_STRLEN);
+    return gw_http_send_spiffs_file(req, "/index.html");
+}
+
+static esp_err_t static_get_handler(httpd_req_t *req)
+{
+    if (!s_spiffs_mounted) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "web fs not mounted");
+        return ESP_OK;
+    }
+
+    const char *uri = req->uri;
+    if (uri == NULL) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad uri");
+        return ESP_OK;
+    }
+
+    // Prevent path traversal.
+    if (strstr(uri, "..") != NULL) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad path");
+        return ESP_OK;
+    }
+
+    if (strcmp(uri, "/") == 0) {
+        return gw_http_send_spiffs_file(req, "/index.html");
+    }
+
+    // Strip query (defensive; typically not present in req->uri).
+    const char *q = strchr(uri, '?');
+    size_t uri_len = (q != NULL) ? (size_t)(q - uri) : strlen(uri);
+    if (uri_len == 0 || uri_len > 200) {
+        httpd_resp_send_err(req, HTTPD_414_URI_TOO_LONG, "bad uri");
+        return ESP_OK;
+    }
+
+    char path[256];
+    int n = snprintf(path, sizeof(path), "%.*s", (int)uri_len, uri);
+    if (n <= 0 || n >= (int)sizeof(path)) {
+        httpd_resp_send_err(req, HTTPD_414_URI_TOO_LONG, "bad uri");
+        return ESP_OK;
+    }
+
+    // If file exists -> serve it.
+    char fullpath[256];
+    n = snprintf(fullpath, sizeof(fullpath), "/www%s", path);
+    if (n > 0 && n < (int)sizeof(fullpath)) {
+        struct stat st;
+        if (stat(fullpath, &st) == 0 && S_ISREG(st.st_mode)) {
+            return gw_http_send_spiffs_file(req, path);
+        }
+    }
+
+    // SPA fallback: if it's not an asset path, serve index.html for client-side routing.
+    if (!gw_http_uri_looks_like_asset(path)) {
+        return gw_http_send_spiffs_file(req, "/index.html");
+    }
+
+    httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "not found");
+    return ESP_OK;
 }
 
 static esp_err_t api_devices_get_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "application/json");
 
-    // Stream JSON in chunks to avoid large on-stack buffers (httpd task stack is small).
-    // Output example: [{"device_uid":"0x..","name":"..","short_addr":4660,"has_onoff":true,"has_button":false},...]
     const size_t max_devices = 32;
     gw_device_t *devices = (gw_device_t *)calloc(max_devices, sizeof(gw_device_t));
     if (devices == NULL) {
@@ -136,7 +214,6 @@ static esp_err_t api_devices_get_handler(httpd_req_t *req)
             return ESP_OK;
         }
 
-        // Truncation is acceptable for now (best-effort debugging UI).
         err = httpd_resp_sendstr_chunk(req, line);
         if (err != ESP_OK) {
             free(devices);
@@ -222,11 +299,41 @@ static esp_err_t api_devices_post_handler(httpd_req_t *req)
     return httpd_resp_send(req, "{\"ok\":true}", HTTPD_RESP_USE_STRLEN);
 }
 
+static esp_err_t api_network_permit_join_post_handler(httpd_req_t *req)
+{
+    char query[128];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+        query[0] = '\0';
+    }
+
+    uint8_t seconds = 180;
+    char seconds_s[16] = {0};
+    if (find_query_value(query, "seconds", seconds_s, sizeof(seconds_s)) != NULL) {
+        long v = strtol(seconds_s, NULL, 10);
+        if (v > 0 && v <= 255) {
+            seconds = (uint8_t)v;
+        }
+    }
+
+    esp_err_t err = gw_zigbee_permit_join(seconds);
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "permit_join failed");
+        return ESP_OK;
+    }
+
+    char resp[64];
+    int n = snprintf(resp, sizeof(resp), "{\"ok\":true,\"seconds\":%u}", (unsigned)seconds);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, resp, n);
+}
+
 esp_err_t gw_http_start(void)
 {
     if (s_server != NULL) {
         return ESP_OK;
     }
+
+    (void)gw_http_spiffs_init();
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.uri_match_fn = httpd_uri_match_wildcard;
@@ -257,10 +364,24 @@ esp_err_t gw_http_start(void)
         .handler = api_devices_post_handler,
         .user_ctx = NULL,
     };
+    static const httpd_uri_t api_network_permit_join_post_uri = {
+        .uri = "/api/network/permit_join",
+        .method = HTTP_POST,
+        .handler = api_network_permit_join_post_handler,
+        .user_ctx = NULL,
+    };
+    static const httpd_uri_t static_uri = {
+        .uri = "/*",
+        .method = HTTP_GET,
+        .handler = static_get_handler,
+        .user_ctx = NULL,
+    };
 
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &index_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &api_devices_get_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &api_devices_post_uri));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &api_network_permit_join_post_uri));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &static_uri));
 
     if (s_server_port != 0) {
         ESP_LOGI(TAG, "HTTP server started (port %u)", (unsigned)s_server_port);
@@ -275,6 +396,7 @@ esp_err_t gw_http_stop(void)
     if (s_server == NULL) {
         return ESP_OK;
     }
+
     esp_err_t err = httpd_stop(s_server);
     s_server = NULL;
     s_server_port = 0;
