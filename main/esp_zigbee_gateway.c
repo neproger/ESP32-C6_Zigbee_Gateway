@@ -24,16 +24,199 @@
 #include "esp_vfs_usb_serial_jtag.h"
 #include "esp_vfs_eventfd.h"
 #include "esp_wifi.h"
+#include "esp_timer.h"
 #include "nvs_flash.h"
 #include "esp_zigbee_gateway.h"
+#include "esp_zigbee_cluster.h"
 #include "zb_config_platform.h"
 
 #include "gw_wifi.h"
 #include "gw_zigbee/gw_zigbee.h"
+#include "gw_core/event_bus.h"
 #include "gw_core/device_registry.h"
+#include "gw_core/sensor_store.h"
+#include "gw_core/zb_model.h"
 #include "gw_http/gw_http.h"
 
+#include "zcl/esp_zigbee_zcl_command.h"
+#include "zcl/esp_zigbee_zcl_core.h"
+#include "zcl/esp_zigbee_zcl_on_off.h"
+#include "zcl/esp_zigbee_zcl_common.h"
+#include "zcl/esp_zigbee_zcl_humidity_meas.h"
+#include "zcl/esp_zigbee_zcl_power_config.h"
+#include "zcl/esp_zigbee_zcl_temperature_meas.h"
+
 static const char *TAG = "ESP_ZB_GATEWAY";
+
+static esp_err_t zb_core_action_handler(esp_zb_core_action_callback_id_t callback_id, const void *message)
+{
+    if (callback_id == ESP_ZB_CORE_REPORT_ATTR_CB_ID) {
+        const esp_zb_zcl_report_attr_message_t *m = (const esp_zb_zcl_report_attr_message_t *)message;
+        if (m == NULL) {
+            return ESP_OK;
+        }
+
+        uint16_t src_short = 0;
+        if (m->src_address.addr_type == ESP_ZB_ZCL_ADDR_TYPE_SHORT) {
+            src_short = m->src_address.u.short_addr;
+        }
+
+        gw_device_uid_t uid = {0};
+        if (!gw_zb_model_find_uid_by_short(src_short, &uid) && src_short != 0) {
+            (void)gw_zigbee_discover_by_short(src_short);
+        }
+
+        // Persist interesting sensor values for UI/debugging.
+        const uint16_t cluster_id = m->cluster;
+        const uint16_t attr_id = m->attribute.id;
+        if (uid.uid[0] != '\0' && m->attribute.data.value != NULL) {
+            gw_sensor_value_t v = {0};
+            v.uid = uid;
+            v.short_addr = src_short;
+            v.endpoint = m->src_endpoint;
+            v.cluster_id = cluster_id;
+            v.attr_id = attr_id;
+            v.ts_ms = (uint64_t)(esp_timer_get_time() / 1000);
+
+            if (cluster_id == ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT && attr_id == ESP_ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID &&
+                m->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_S16 && m->attribute.data.size >= 2) {
+                v.value_type = GW_SENSOR_VALUE_I32;
+                v.value_i32 = *((const int16_t *)m->attribute.data.value);
+                (void)gw_sensor_store_upsert(&v);
+            } else if (cluster_id == ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT && attr_id == ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID &&
+                       m->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_U16 && m->attribute.data.size >= 2) {
+                v.value_type = GW_SENSOR_VALUE_U32;
+                v.value_u32 = *((const uint16_t *)m->attribute.data.value);
+                (void)gw_sensor_store_upsert(&v);
+            } else if (cluster_id == ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG && attr_id == ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID &&
+                       m->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_U8 && m->attribute.data.size >= 1) {
+                v.value_type = GW_SENSOR_VALUE_U32;
+                v.value_u32 = *((const uint8_t *)m->attribute.data.value);
+                (void)gw_sensor_store_upsert(&v);
+            }
+        }
+
+        // Log into event bus (and UART mirror) for quick visibility.
+        {
+            char msg[96];
+            (void)snprintf(msg,
+                           sizeof(msg),
+                           "report cluster=0x%04x attr=0x%04x ep=%u type=0x%02x size=%u",
+                           (unsigned)cluster_id,
+                           (unsigned)attr_id,
+                           (unsigned)m->src_endpoint,
+                           (unsigned)m->attribute.data.type,
+                           (unsigned)m->attribute.data.size);
+            gw_event_bus_publish("zigbee_attr_report", "zigbee", uid.uid, src_short, msg);
+        }
+
+        return ESP_OK;
+    }
+
+    if (callback_id == ESP_ZB_CORE_CMD_READ_ATTR_RESP_CB_ID) {
+        const esp_zb_zcl_cmd_read_attr_resp_message_t *m = (const esp_zb_zcl_cmd_read_attr_resp_message_t *)message;
+        if (m == NULL) {
+            return ESP_OK;
+        }
+
+        uint16_t src_short = 0;
+        if (m->info.src_address.addr_type == ESP_ZB_ZCL_ADDR_TYPE_SHORT) {
+            src_short = m->info.src_address.u.short_addr;
+        }
+
+        gw_device_uid_t uid = {0};
+        if (!gw_zb_model_find_uid_by_short(src_short, &uid) && src_short != 0) {
+            (void)gw_zigbee_discover_by_short(src_short);
+        }
+
+        for (esp_zb_zcl_read_attr_resp_variable_t *it = m->variables; it != NULL; it = it->next) {
+            const uint16_t cluster_id = m->info.cluster;
+            const uint16_t attr_id = it->attribute.id;
+
+            if (uid.uid[0] != '\0' && it->status == ESP_ZB_ZCL_STATUS_SUCCESS && it->attribute.data.value != NULL) {
+                gw_sensor_value_t v = {0};
+                v.uid = uid;
+                v.short_addr = src_short;
+                v.endpoint = m->info.src_endpoint;
+                v.cluster_id = cluster_id;
+                v.attr_id = attr_id;
+                v.ts_ms = (uint64_t)(esp_timer_get_time() / 1000);
+
+                if (cluster_id == ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT && attr_id == ESP_ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID &&
+                    it->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_S16 && it->attribute.data.size >= 2) {
+                    v.value_type = GW_SENSOR_VALUE_I32;
+                    v.value_i32 = *((const int16_t *)it->attribute.data.value);
+                    (void)gw_sensor_store_upsert(&v);
+                } else if (cluster_id == ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT &&
+                           attr_id == ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID && it->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_U16 &&
+                           it->attribute.data.size >= 2) {
+                    v.value_type = GW_SENSOR_VALUE_U32;
+                    v.value_u32 = *((const uint16_t *)it->attribute.data.value);
+                    (void)gw_sensor_store_upsert(&v);
+                } else if (cluster_id == ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG &&
+                           attr_id == ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID && it->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_U8 &&
+                           it->attribute.data.size >= 1) {
+                    v.value_type = GW_SENSOR_VALUE_U32;
+                    v.value_u32 = *((const uint8_t *)it->attribute.data.value);
+                    (void)gw_sensor_store_upsert(&v);
+                }
+            }
+        }
+
+        gw_event_bus_publish("zigbee_read_attr_resp", "zigbee", uid.uid, src_short, "read attr response received");
+        return ESP_OK;
+    }
+
+    if (callback_id == ESP_ZB_CORE_SET_ATTR_VALUE_CB_ID) {
+        const esp_zb_zcl_set_attr_value_message_t *m = (const esp_zb_zcl_set_attr_value_message_t *)message;
+        if (m == NULL) {
+            return ESP_OK;
+        }
+
+        if (m->info.cluster == ESP_ZB_ZCL_CLUSTER_ID_ON_OFF && m->attribute.id == ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID) {
+            uint8_t onoff = 0;
+            if (m->attribute.data.value != NULL && m->attribute.data.size >= 1) {
+                onoff = *((const uint8_t *)m->attribute.data.value);
+            }
+
+            char msg[80];
+            (void)snprintf(msg, sizeof(msg), "onoff=%u dst_ep=%u", (unsigned)onoff, (unsigned)m->info.dst_endpoint);
+            gw_event_bus_publish("zigbee_onoff_attr", "zigbee", "", 0, msg);
+        }
+
+        return ESP_OK;
+    }
+
+    if (callback_id == ESP_ZB_CORE_CMD_PRIVILEGE_COMMAND_REQ_CB_ID) {
+        const esp_zb_zcl_privilege_command_message_t *m = (const esp_zb_zcl_privilege_command_message_t *)message;
+        if (m == NULL) {
+            return ESP_OK;
+        }
+
+        if (m->info.cluster == ESP_ZB_ZCL_CLUSTER_ID_ON_OFF && m->info.command.id == ESP_ZB_ZCL_CMD_ON_OFF_TOGGLE_ID) {
+            uint16_t src_short = 0;
+            if (m->info.src_address.addr_type == ESP_ZB_ZCL_ADDR_TYPE_SHORT) {
+                src_short = m->info.src_address.u.short_addr;
+            }
+
+            gw_device_uid_t uid = {0};
+            if (!gw_zb_model_find_uid_by_short(src_short, &uid) && src_short != 0) {
+                (void)gw_zigbee_discover_by_short(src_short);
+            }
+
+            char msg[128];
+            (void)snprintf(msg,
+                           sizeof(msg),
+                           "on_off toggle (src=0x%04x ep=%u rssi=%d)",
+                           (unsigned)src_short,
+                           (unsigned)m->info.src_endpoint,
+                           (int)m->info.header.rssi);
+            gw_event_bus_publish("zigbee_onoff_toggle", "zigbee", uid.uid, src_short, msg);
+        }
+    }
+
+    return ESP_OK;
+}
 
 /* Note: Please select the correct console output port based on the development board in menuconfig */
 #if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
@@ -156,8 +339,22 @@ static void esp_zb_task(void *pvParameters)
     esp_zb_basic_cluster_add_attr(basic_cluser, ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID, ESP_MODEL_IDENTIFIER);
     esp_zb_cluster_list_add_basic_cluster(cluster_list, basic_cluser, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
     esp_zb_cluster_list_add_identify_cluster(cluster_list, esp_zb_identify_cluster_create(NULL), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+
+    // Groups server enables receiving group-addressed commands (and helps with interoperability).
+    esp_zb_groups_cluster_cfg_t groups_cfg = {.groups_name_support_id = 0};
+    esp_zb_cluster_list_add_groups_cluster(cluster_list, esp_zb_groups_cluster_create(&groups_cfg), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+
+    // Expose an On/Off server so HA switches can bind to the gateway and we can observe toggle commands.
+    esp_zb_on_off_cluster_cfg_t on_off_cfg = {.on_off = false};
+    esp_zb_cluster_list_add_on_off_cluster(cluster_list, esp_zb_on_off_cluster_create(&on_off_cfg), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
     esp_zb_ep_list_add_gateway_ep(ep_list, cluster_list, endpoint_config);
     esp_zb_device_register(ep_list);
+
+    // Allow the application to observe On/Off Toggle as a "privilege command" callback.
+    esp_zb_core_action_handler_register(zb_core_action_handler);
+    (void)esp_zb_zcl_add_privilege_command(ESP_ZB_GATEWAY_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_ON_OFF, ESP_ZB_ZCL_CMD_ON_OFF_TOGGLE_ID);
+    gw_event_bus_publish("zigbee_ready", "zigbee", "", 0, "registered privilege handler for on_off toggle");
+
     ESP_ERROR_CHECK(esp_zb_start(false));
     esp_zb_stack_main_loop();
     vTaskDelete(NULL);
@@ -174,6 +371,10 @@ void app_main(void)
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+    ESP_ERROR_CHECK(gw_event_bus_init());
+    ESP_ERROR_CHECK(gw_zb_model_init());
+    ESP_ERROR_CHECK(gw_sensor_store_init());
+    gw_event_bus_publish("boot", "system", "", 0, "app_main started");
 
 #if CONFIG_ESP_COEX_SW_COEXIST_ENABLE
     esp_coex_wifi_i154_enable();

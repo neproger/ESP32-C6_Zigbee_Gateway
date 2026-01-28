@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
 function capsToText(device) {
@@ -40,7 +41,7 @@ export default function Devices() {
   }, [])
 
   const permitJoin = useCallback(async () => {
-    setStatus('Permit join: requesting…')
+    setStatus('Permit join: requesting...')
     try {
       const r = await fetch('/api/network/permit_join?seconds=180', { method: 'POST' })
       if (!r.ok) throw new Error(`POST /api/network/permit_join failed: ${r.status}`)
@@ -51,6 +52,27 @@ export default function Devices() {
       setStatus(String(e?.message ?? e))
     }
   }, [])
+
+  const removeDevice = useCallback(
+    async (uid, kick) => {
+      const u = String(uid ?? '')
+      if (!u) return
+      const text = kick ? `Remove + kick device ${u}?` : `Remove device ${u} from memory?`
+      if (!confirm(text)) return
+
+      setStatus(kick ? 'Removing + kicking...' : 'Removing...')
+      try {
+        const r = await fetch(`/api/devices/remove?uid=${encodeURIComponent(u)}&kick=${kick ? '1' : '0'}`, { method: 'POST' })
+        if (!r.ok) throw new Error(`POST /api/devices/remove failed: ${r.status}`)
+        await r.json().catch(() => null)
+        await loadDevices()
+        setStatus(kick ? 'Removed + kick requested' : 'Removed')
+      } catch (e) {
+        setStatus(String(e?.message ?? e))
+      }
+    },
+    [loadDevices],
+  )
 
   useEffect(() => {
     loadDevices()
@@ -65,7 +87,7 @@ export default function Devices() {
         </div>
         <div className="row">
           <button onClick={loadDevices} disabled={loading}>
-            {loading ? 'Refreshing…' : 'Refresh'}
+            {loading ? 'Refreshing...' : 'Refresh'}
           </button>
           <button onClick={permitJoin}>Scan new devices (permit join)</button>
         </div>
@@ -81,26 +103,35 @@ export default function Devices() {
               <th>Name</th>
               <th>Short</th>
               <th>Caps</th>
+              <th>Actions</th>
             </tr>
           </thead>
           <tbody>
             {sortedDevices.length === 0 ? (
               <tr>
-                <td colSpan={4} className="muted">
-                  No devices yet. Click “Scan new devices (permit join)”, then pair a Zigbee device.
+                <td colSpan={5} className="muted">
+                  No devices yet. Click "Scan new devices (permit join)", then pair a Zigbee device.
                 </td>
               </tr>
             ) : (
               sortedDevices.map((d) => (
                 <tr key={String(d?.device_uid ?? Math.random())}>
                   <td>
-                    <code>{String(d?.device_uid ?? '')}</code>
+                    <Link to={`/devices/${encodeURIComponent(String(d?.device_uid ?? ''))}`}>
+                      <code>{String(d?.device_uid ?? '')}</code>
+                    </Link>
                   </td>
                   <td>{String(d?.name ?? '')}</td>
                   <td>
                     <code>{shortToHex(d?.short_addr)}</code>
                   </td>
                   <td>{capsToText(d)}</td>
+                  <td>
+                    <div className="row">
+                      <button onClick={() => removeDevice(d?.device_uid, false)}>Forget</button>
+                      <button onClick={() => removeDevice(d?.device_uid, true)}>Forget + kick</button>
+                    </div>
+                  </td>
                 </tr>
               ))
             )}
@@ -110,4 +141,3 @@ export default function Devices() {
     </div>
   )
 }
-

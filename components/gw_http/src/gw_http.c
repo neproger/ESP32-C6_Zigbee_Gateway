@@ -10,6 +10,9 @@
 #include "esp_spiffs.h"
 
 #include "gw_core/device_registry.h"
+#include "gw_core/event_bus.h"
+#include "gw_core/sensor_store.h"
+#include "gw_core/zb_model.h"
 #include "gw_zigbee/gw_zigbee.h"
 
 static const char *TAG = "gw_http";
@@ -17,6 +20,13 @@ static const char *TAG = "gw_http";
 static httpd_handle_t s_server;
 static uint16_t s_server_port;
 static bool s_spiffs_mounted;
+
+static const char *find_query_value(const char *query, const char *key, char *out, size_t out_size);
+
+static esp_err_t api_events_get_handler(httpd_req_t *req);
+static esp_err_t api_devices_remove_post_handler(httpd_req_t *req);
+static esp_err_t api_endpoints_get_handler(httpd_req_t *req);
+static esp_err_t api_sensors_get_handler(httpd_req_t *req);
 
 static esp_err_t gw_http_spiffs_init(void)
 {
@@ -233,6 +243,191 @@ static esp_err_t api_devices_get_handler(httpd_req_t *req)
     return httpd_resp_sendstr_chunk(req, NULL);
 }
 
+static esp_err_t api_endpoints_get_handler(httpd_req_t *req)
+{
+    char query[128];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+        query[0] = '\0';
+    }
+
+    char uid_s[GW_DEVICE_UID_STRLEN] = {0};
+    if (find_query_value(query, "uid", uid_s, sizeof(uid_s)) == NULL) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing uid");
+        return ESP_OK;
+    }
+
+    gw_device_uid_t uid = {0};
+    strlcpy(uid.uid, uid_s, sizeof(uid.uid));
+
+    const size_t max_eps = 16;
+    gw_zb_endpoint_t *eps = (gw_zb_endpoint_t *)calloc(max_eps, sizeof(gw_zb_endpoint_t));
+    if (eps == NULL) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no mem");
+        return ESP_OK;
+    }
+
+    size_t count = gw_zb_model_list_endpoints(&uid, eps, max_eps);
+
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t err = httpd_resp_sendstr_chunk(req, "[");
+    if (err != ESP_OK) {
+        free(eps);
+        return err;
+    }
+
+    for (size_t i = 0; i < count; i++) {
+        const gw_zb_endpoint_t *e = &eps[i];
+        char head[96];
+        int n = snprintf(head,
+                         sizeof(head),
+                         "%s{\"endpoint\":%u,\"profile_id\":%u,\"device_id\":%u,\"in_clusters\":[",
+                         (i == 0 ? "" : ","),
+                         (unsigned)e->endpoint,
+                         (unsigned)e->profile_id,
+                         (unsigned)e->device_id);
+        if (n < 0) {
+            free(eps);
+            httpd_resp_sendstr_chunk(req, NULL);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "format error");
+            return ESP_OK;
+        }
+        err = httpd_resp_sendstr_chunk(req, head);
+        if (err != ESP_OK) {
+            free(eps);
+            httpd_resp_sendstr_chunk(req, NULL);
+            return err;
+        }
+
+        for (uint8_t c = 0; c < e->in_cluster_count; c++) {
+            char t[16];
+            n = snprintf(t, sizeof(t), "%s%u", (c == 0 ? "" : ","), (unsigned)e->in_clusters[c]);
+            if (n < 0) {
+                free(eps);
+                httpd_resp_sendstr_chunk(req, NULL);
+                httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "format error");
+                return ESP_OK;
+            }
+            err = httpd_resp_sendstr_chunk(req, t);
+            if (err != ESP_OK) {
+                free(eps);
+                httpd_resp_sendstr_chunk(req, NULL);
+                return err;
+            }
+        }
+
+        err = httpd_resp_sendstr_chunk(req, "],\"out_clusters\":[");
+        if (err != ESP_OK) {
+            free(eps);
+            httpd_resp_sendstr_chunk(req, NULL);
+            return err;
+        }
+
+        for (uint8_t c = 0; c < e->out_cluster_count; c++) {
+            char t[16];
+            n = snprintf(t, sizeof(t), "%s%u", (c == 0 ? "" : ","), (unsigned)e->out_clusters[c]);
+            if (n < 0) {
+                free(eps);
+                httpd_resp_sendstr_chunk(req, NULL);
+                httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "format error");
+                return ESP_OK;
+            }
+            err = httpd_resp_sendstr_chunk(req, t);
+            if (err != ESP_OK) {
+                free(eps);
+                httpd_resp_sendstr_chunk(req, NULL);
+                return err;
+            }
+        }
+
+        err = httpd_resp_sendstr_chunk(req, "]}");
+        if (err != ESP_OK) {
+            free(eps);
+            httpd_resp_sendstr_chunk(req, NULL);
+            return err;
+        }
+    }
+
+    free(eps);
+    err = httpd_resp_sendstr_chunk(req, "]");
+    if (err != ESP_OK) {
+        httpd_resp_sendstr_chunk(req, NULL);
+        return err;
+    }
+    return httpd_resp_sendstr_chunk(req, NULL);
+}
+
+static esp_err_t api_sensors_get_handler(httpd_req_t *req)
+{
+    char query[128];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+        query[0] = '\0';
+    }
+
+    char uid_s[GW_DEVICE_UID_STRLEN] = {0};
+    if (find_query_value(query, "uid", uid_s, sizeof(uid_s)) == NULL) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing uid");
+        return ESP_OK;
+    }
+
+    gw_device_uid_t uid = {0};
+    strlcpy(uid.uid, uid_s, sizeof(uid.uid));
+
+    const size_t max_vals = 32;
+    gw_sensor_value_t *vals = (gw_sensor_value_t *)calloc(max_vals, sizeof(gw_sensor_value_t));
+    if (vals == NULL) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no mem");
+        return ESP_OK;
+    }
+
+    size_t count = gw_sensor_store_list(&uid, vals, max_vals);
+
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t err = httpd_resp_sendstr_chunk(req, "[");
+    if (err != ESP_OK) {
+        free(vals);
+        return err;
+    }
+
+    for (size_t i = 0; i < count; i++) {
+        const gw_sensor_value_t *v = &vals[i];
+        char line[196];
+        const char *key = (v->value_type == GW_SENSOR_VALUE_I32) ? "value_i32" : "value_u32";
+        long long ts = (long long)v->ts_ms;
+        long long val = (v->value_type == GW_SENSOR_VALUE_I32) ? (long long)v->value_i32 : (long long)v->value_u32;
+
+        int n = snprintf(line,
+                         sizeof(line),
+                         "%s{\"endpoint\":%u,\"cluster_id\":%u,\"attr_id\":%u,\"%s\":%lld,\"ts_ms\":%lld}",
+                         (i == 0 ? "" : ","),
+                         (unsigned)v->endpoint,
+                         (unsigned)v->cluster_id,
+                         (unsigned)v->attr_id,
+                         key,
+                         val,
+                         ts);
+        if (n < 0) {
+            free(vals);
+            httpd_resp_sendstr_chunk(req, NULL);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "format error");
+            return ESP_OK;
+        }
+        err = httpd_resp_sendstr_chunk(req, line);
+        if (err != ESP_OK) {
+            free(vals);
+            httpd_resp_sendstr_chunk(req, NULL);
+            return err;
+        }
+    }
+
+    free(vals);
+    err = httpd_resp_sendstr_chunk(req, "]");
+    if (err != ESP_OK) {
+        httpd_resp_sendstr_chunk(req, NULL);
+        return err;
+    }
+    return httpd_resp_sendstr_chunk(req, NULL);
+}
+
 static const char *find_query_value(const char *query, const char *key, char *out, size_t out_size)
 {
     if (query == NULL || key == NULL || out == NULL || out_size == 0) {
@@ -259,6 +454,79 @@ static const char *find_query_value(const char *query, const char *key, char *ou
         }
     }
     return NULL;
+}
+
+static esp_err_t gw_http_json_send_escaped(httpd_req_t *req, const char *s)
+{
+    if (s == NULL) {
+        s = "";
+    }
+
+    char out[96];
+    size_t out_len = 0;
+
+    const unsigned char *p = (const unsigned char *)s;
+    while (*p) {
+        const unsigned char c = *p++;
+        const char *rep = NULL;
+        char esc[8];
+
+        switch (c) {
+        case '\\':
+            rep = "\\\\";
+            break;
+        case '"':
+            rep = "\\\"";
+            break;
+        case '\n':
+            rep = "\\n";
+            break;
+        case '\r':
+            rep = "\\r";
+            break;
+        case '\t':
+            rep = "\\t";
+            break;
+        default:
+            if (c < 0x20) {
+                (void)snprintf(esc, sizeof(esc), "\\u%04x", (unsigned)c);
+                rep = esc;
+            }
+            break;
+        }
+
+        if (rep != NULL) {
+            size_t rep_len = strlen(rep);
+            if (out_len + rep_len >= sizeof(out)) {
+                out[out_len] = '\0';
+                esp_err_t err = httpd_resp_sendstr_chunk(req, out);
+                if (err != ESP_OK) {
+                    return err;
+                }
+                out_len = 0;
+            }
+            memcpy(&out[out_len], rep, rep_len);
+            out_len += rep_len;
+            continue;
+        }
+
+        if (out_len + 1 >= sizeof(out)) {
+            out[out_len] = '\0';
+            esp_err_t err = httpd_resp_sendstr_chunk(req, out);
+            if (err != ESP_OK) {
+                return err;
+            }
+            out_len = 0;
+        }
+        out[out_len++] = (char)c;
+    }
+
+    if (out_len > 0) {
+        out[out_len] = '\0';
+        return httpd_resp_sendstr_chunk(req, out);
+    }
+
+    return ESP_OK;
 }
 
 static esp_err_t api_devices_post_handler(httpd_req_t *req)
@@ -299,6 +567,67 @@ static esp_err_t api_devices_post_handler(httpd_req_t *req)
     return httpd_resp_send(req, "{\"ok\":true}", HTTPD_RESP_USE_STRLEN);
 }
 
+static esp_err_t api_devices_remove_post_handler(httpd_req_t *req)
+{
+    char query[256];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+        query[0] = '\0';
+    }
+
+    char uid_s[GW_DEVICE_UID_STRLEN] = {0};
+    if (find_query_value(query, "uid", uid_s, sizeof(uid_s)) == NULL) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing uid");
+        return ESP_OK;
+    }
+
+    bool kick = false;
+    char kick_s[8] = {0};
+    if (find_query_value(query, "kick", kick_s, sizeof(kick_s)) != NULL) {
+        kick = (kick_s[0] == '1' || kick_s[0] == 't' || kick_s[0] == 'T' || kick_s[0] == 'y' || kick_s[0] == 'Y');
+    }
+
+    gw_device_uid_t uid = {0};
+    strlcpy(uid.uid, uid_s, sizeof(uid.uid));
+
+    uint16_t short_addr = 0;
+    if (kick) {
+        gw_device_t d = {0};
+        esp_err_t err = gw_device_registry_get(&uid, &d);
+        if (err != ESP_OK) {
+            httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "device not found");
+            return ESP_OK;
+        }
+        short_addr = d.short_addr;
+
+        err = gw_zigbee_device_leave(&uid, short_addr, false);
+        if (err != ESP_OK) {
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "leave failed");
+            return ESP_OK;
+        }
+
+        char msg[64];
+        (void)snprintf(msg, sizeof(msg), "uid=%s short=0x%04x", uid.uid, (unsigned)short_addr);
+        gw_event_bus_publish("api_device_kick", "http", uid.uid, short_addr, msg);
+    }
+
+    esp_err_t rm = gw_device_registry_remove(&uid);
+    if (rm != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "device not found");
+        return ESP_OK;
+    }
+
+    gw_event_bus_publish("api_device_removed", "http", uid.uid, short_addr, kick ? "kick=1" : "kick=0");
+
+    httpd_resp_set_type(req, "application/json");
+    char resp[96];
+    int n = snprintf(resp,
+                     sizeof(resp),
+                     "{\"ok\":true,\"uid\":\"%s\",\"kick\":%s}",
+                     uid.uid,
+                     kick ? "true" : "false");
+    return httpd_resp_send(req, resp, n);
+}
+
 static esp_err_t api_network_permit_join_post_handler(httpd_req_t *req)
 {
     char query[128];
@@ -321,10 +650,155 @@ static esp_err_t api_network_permit_join_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
+    {
+        char msg[48];
+        (void)snprintf(msg, sizeof(msg), "seconds=%u", (unsigned)seconds);
+        gw_event_bus_publish("api_permit_join", "http", "", 0, msg);
+    }
+
     char resp[64];
     int n = snprintf(resp, sizeof(resp), "{\"ok\":true,\"seconds\":%u}", (unsigned)seconds);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, resp, n);
+}
+
+static esp_err_t api_events_get_handler(httpd_req_t *req)
+{
+    char query[128];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+        query[0] = '\0';
+    }
+
+    uint32_t since = 0;
+    char since_s[16] = {0};
+    if (find_query_value(query, "since", since_s, sizeof(since_s)) != NULL) {
+        unsigned long v = strtoul(since_s, NULL, 10);
+        since = (uint32_t)v;
+    }
+
+    size_t limit = 64;
+    char limit_s[16] = {0};
+    if (find_query_value(query, "limit", limit_s, sizeof(limit_s)) != NULL) {
+        unsigned long v = strtoul(limit_s, NULL, 10);
+        if (v >= 1 && v <= 128) {
+            limit = (size_t)v;
+        }
+    }
+
+    gw_event_t *events = (gw_event_t *)calloc(limit, sizeof(gw_event_t));
+    if (events == NULL) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no mem");
+        return ESP_OK;
+    }
+
+    uint32_t last_id = 0;
+    size_t count = gw_event_bus_list_since(since, events, limit, &last_id);
+
+    httpd_resp_set_type(req, "application/json");
+
+    esp_err_t err = httpd_resp_sendstr_chunk(req, "{\"last_id\":");
+    if (err != ESP_OK) {
+        free(events);
+        return err;
+    }
+
+    char tmp[32];
+    int n = snprintf(tmp, sizeof(tmp), "%u", (unsigned)last_id);
+    if (n < 0) {
+        free(events);
+        httpd_resp_sendstr_chunk(req, NULL);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "format error");
+        return ESP_OK;
+    }
+
+    err = httpd_resp_sendstr_chunk(req, tmp);
+    if (err != ESP_OK) {
+        free(events);
+        httpd_resp_sendstr_chunk(req, NULL);
+        return err;
+    }
+
+    err = httpd_resp_sendstr_chunk(req, ",\"events\":[");
+    if (err != ESP_OK) {
+        free(events);
+        httpd_resp_sendstr_chunk(req, NULL);
+        return err;
+    }
+
+    for (size_t i = 0; i < count; i++) {
+        const gw_event_t *e = &events[i];
+        err = httpd_resp_sendstr_chunk(req, (i == 0) ? "{" : ",{");
+        if (err != ESP_OK) {
+            free(events);
+            httpd_resp_sendstr_chunk(req, NULL);
+            return err;
+        }
+
+        n = snprintf(tmp, sizeof(tmp), "\"id\":%u,\"ts_ms\":%llu,", (unsigned)e->id, (unsigned long long)e->ts_ms);
+        if (n < 0) {
+            free(events);
+            httpd_resp_sendstr_chunk(req, NULL);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "format error");
+            return ESP_OK;
+        }
+        err = httpd_resp_sendstr_chunk(req, tmp);
+        if (err != ESP_OK) {
+            free(events);
+            httpd_resp_sendstr_chunk(req, NULL);
+            return err;
+        }
+
+        err = httpd_resp_sendstr_chunk(req, "\"type\":\"");
+        if (err == ESP_OK) err = gw_http_json_send_escaped(req, e->type);
+        if (err == ESP_OK) err = httpd_resp_sendstr_chunk(req, "\",\"source\":\"");
+        if (err == ESP_OK) err = gw_http_json_send_escaped(req, e->source);
+        if (err == ESP_OK) err = httpd_resp_sendstr_chunk(req, "\",\"device_uid\":\"");
+        if (err == ESP_OK) err = gw_http_json_send_escaped(req, e->device_uid);
+        if (err == ESP_OK) err = httpd_resp_sendstr_chunk(req, "\"");
+        if (err != ESP_OK) {
+            free(events);
+            httpd_resp_sendstr_chunk(req, NULL);
+            return err;
+        }
+
+        n = snprintf(tmp, sizeof(tmp), ",\"short_addr\":%u,\"msg\":\"", (unsigned)e->short_addr);
+        if (n < 0) {
+            free(events);
+            httpd_resp_sendstr_chunk(req, NULL);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "format error");
+            return ESP_OK;
+        }
+        err = httpd_resp_sendstr_chunk(req, tmp);
+        if (err != ESP_OK) {
+            free(events);
+            httpd_resp_sendstr_chunk(req, NULL);
+            return err;
+        }
+
+        err = gw_http_json_send_escaped(req, e->msg);
+        if (err != ESP_OK) {
+            free(events);
+            httpd_resp_sendstr_chunk(req, NULL);
+            return err;
+        }
+
+        err = httpd_resp_sendstr_chunk(req, "\"}");
+        if (err != ESP_OK) {
+            free(events);
+            httpd_resp_sendstr_chunk(req, NULL);
+            return err;
+        }
+    }
+
+    free(events);
+
+    err = httpd_resp_sendstr_chunk(req, "]}");
+    if (err != ESP_OK) {
+        httpd_resp_sendstr_chunk(req, NULL);
+        return err;
+    }
+
+    return httpd_resp_sendstr_chunk(req, NULL);
 }
 
 esp_err_t gw_http_start(void)
@@ -337,6 +811,9 @@ esp_err_t gw_http_start(void)
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.uri_match_fn = httpd_uri_match_wildcard;
+    // We register several API endpoints + a wildcard handler for SPA/static files.
+    // Default (8) is too small once UI grows.
+    config.max_uri_handlers = 16;
     s_server_port = config.server_port;
 
     esp_err_t err = httpd_start(&s_server, &config);
@@ -364,10 +841,34 @@ esp_err_t gw_http_start(void)
         .handler = api_devices_post_handler,
         .user_ctx = NULL,
     };
+    static const httpd_uri_t api_endpoints_get_uri = {
+        .uri = "/api/endpoints",
+        .method = HTTP_GET,
+        .handler = api_endpoints_get_handler,
+        .user_ctx = NULL,
+    };
+    static const httpd_uri_t api_sensors_get_uri = {
+        .uri = "/api/sensors",
+        .method = HTTP_GET,
+        .handler = api_sensors_get_handler,
+        .user_ctx = NULL,
+    };
+    static const httpd_uri_t api_devices_remove_post_uri = {
+        .uri = "/api/devices/remove",
+        .method = HTTP_POST,
+        .handler = api_devices_remove_post_handler,
+        .user_ctx = NULL,
+    };
     static const httpd_uri_t api_network_permit_join_post_uri = {
         .uri = "/api/network/permit_join",
         .method = HTTP_POST,
         .handler = api_network_permit_join_post_handler,
+        .user_ctx = NULL,
+    };
+    static const httpd_uri_t api_events_get_uri = {
+        .uri = "/api/events",
+        .method = HTTP_GET,
+        .handler = api_events_get_handler,
         .user_ctx = NULL,
     };
     static const httpd_uri_t static_uri = {
@@ -380,7 +881,11 @@ esp_err_t gw_http_start(void)
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &index_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &api_devices_get_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &api_devices_post_uri));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &api_endpoints_get_uri));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &api_sensors_get_uri));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &api_devices_remove_post_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &api_network_permit_join_post_uri));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &api_events_get_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &static_uri));
 
     if (s_server_port != 0) {
@@ -407,4 +912,3 @@ uint16_t gw_http_get_port(void)
 {
     return s_server_port;
 }
-

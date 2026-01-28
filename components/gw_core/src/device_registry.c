@@ -60,6 +60,26 @@ esp_err_t gw_device_registry_get(const gw_device_uid_t *uid, gw_device_t *out_de
     return ESP_OK;
 }
 
+esp_err_t gw_device_registry_remove(const gw_device_uid_t *uid)
+{
+    if (!s_inited || uid == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    size_t idx = find_device_index(uid);
+    if (idx == (size_t)-1) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    // Shift down to keep array packed.
+    for (size_t i = idx + 1; i < s_device_count; i++) {
+        s_devices[i - 1] = s_devices[i];
+    }
+    s_device_count--;
+    memset(&s_devices[s_device_count], 0, sizeof(s_devices[s_device_count]));
+    return ESP_OK;
+}
+
 size_t gw_device_registry_list(gw_device_t *out_devices, size_t max_devices)
 {
     if (!s_inited || out_devices == NULL || max_devices == 0) {

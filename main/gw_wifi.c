@@ -1,5 +1,6 @@
 #include "gw_wifi.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
@@ -12,6 +13,7 @@
 #include "esp_netif_ip_addr.h"
 #include "esp_wifi.h"
 
+#include "gw_core/event_bus.h"
 #include "gw_http/gw_http.h"
 #include "wifi_aps_config.h"
 
@@ -36,11 +38,17 @@ static void gw_wifi_event_handler(void *arg, esp_event_base_t event_base, int32_
     (void)arg;
 
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        const wifi_event_sta_disconnected_t *disc = (const wifi_event_sta_disconnected_t *)event_data;
+        char msg[96];
         if (s_ctx.retries < s_ctx.max_retries) {
             s_ctx.retries++;
             ESP_LOGW(TAG, "Wi-Fi disconnected, retry %d/%d", s_ctx.retries, s_ctx.max_retries);
+            (void)snprintf(msg, sizeof(msg), "disconnected: reason=%u retry %d/%d", disc ? (unsigned)disc->reason : 0U, s_ctx.retries, s_ctx.max_retries);
+            gw_event_bus_publish("wifi_disconnected", "wifi", "", 0, msg);
             esp_wifi_connect();
         } else {
+            (void)snprintf(msg, sizeof(msg), "disconnected: reason=%u retries exhausted", disc ? (unsigned)disc->reason : 0U);
+            gw_event_bus_publish("wifi_connect_failed", "wifi", "", 0, msg);
             xEventGroupSetBits(s_ctx.event_group, GW_WIFI_FAIL_BIT);
         }
         return;
@@ -52,6 +60,15 @@ static void gw_wifi_event_handler(void *arg, esp_event_base_t event_base, int32_
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
 
         uint16_t port = gw_http_get_port();
+        {
+            char msg[128];
+            if (port == 0 || port == 80) {
+                (void)snprintf(msg, sizeof(msg), "ip=" IPSTR " web=http://" IPSTR "/", IP2STR(&event->ip_info.ip), IP2STR(&event->ip_info.ip));
+            } else {
+                (void)snprintf(msg, sizeof(msg), "ip=" IPSTR " web=http://" IPSTR ":%u/", IP2STR(&event->ip_info.ip), IP2STR(&event->ip_info.ip), (unsigned)port);
+            }
+            gw_event_bus_publish("wifi_got_ip", "wifi", "", 0, msg);
+        }
         if (port == 0 || port == 80) {
             ESP_LOGI(TAG, "Web UI: http://" IPSTR "/", IP2STR(&event->ip_info.ip));
         } else {
@@ -129,6 +146,7 @@ static esp_err_t gw_wifi_scan_build_candidates(gw_wifi_candidate_t *candidates, 
     ESP_RETURN_ON_ERROR(esp_wifi_scan_get_ap_num(&ap_num), TAG, "esp_wifi_scan_get_ap_num failed");
     if (ap_num == 0) {
         ESP_LOGW(TAG, "Scan found 0 APs");
+        gw_event_bus_publish("wifi_scan", "wifi", "", 0, "scan found 0 APs");
         return ESP_OK;
     }
 
@@ -175,6 +193,7 @@ static esp_err_t gw_wifi_scan_build_candidates(gw_wifi_candidate_t *candidates, 
 
     if (*out_count == 0) {
         ESP_LOGW(TAG, "No known SSIDs found in scan results");
+        gw_event_bus_publish("wifi_scan", "wifi", "", 0, "no known SSIDs found in scan results");
         return ESP_OK;
     }
 
@@ -199,6 +218,11 @@ static esp_err_t gw_wifi_try_connect_one(const gw_wifi_ap_credential_t *ap, int 
     xEventGroupClearBits(s_ctx.event_group, GW_WIFI_CONNECTED_BIT | GW_WIFI_FAIL_BIT);
 
     ESP_LOGI(TAG, "Connecting to SSID: %s", ap->ssid);
+    {
+        char msg[96];
+        (void)snprintf(msg, sizeof(msg), "ssid=%s", ap->ssid);
+        gw_event_bus_publish("wifi_connecting", "wifi", "", 0, msg);
+    }
 
     if (s_wifi_started) {
         (void)esp_wifi_disconnect();
@@ -227,10 +251,20 @@ static esp_err_t gw_wifi_try_connect_one(const gw_wifi_ap_credential_t *ap, int 
 
     if (bits & GW_WIFI_CONNECTED_BIT) {
         ESP_LOGI(TAG, "Connected to %s", ap->ssid);
+        {
+            char msg[96];
+            (void)snprintf(msg, sizeof(msg), "ssid=%s", ap->ssid);
+            gw_event_bus_publish("wifi_connected", "wifi", "", 0, msg);
+        }
         return ESP_OK;
     }
 
     ESP_LOGW(TAG, "Failed to connect to %s", ap->ssid);
+    {
+        char msg[96];
+        (void)snprintf(msg, sizeof(msg), "ssid=%s", ap->ssid);
+        gw_event_bus_publish("wifi_connect_failed", "wifi", "", 0, msg);
+    }
     return ESP_FAIL;
 }
 
