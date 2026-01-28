@@ -15,7 +15,19 @@
 
 #include "gw_core/event_bus.h"
 #include "gw_http/gw_http.h"
+
+#if defined(__has_include) && __has_include("wifi_aps_config.h")
 #include "wifi_aps_config.h"
+#else
+#include <stddef.h>
+typedef struct
+{
+    const char *ssid;
+    const char *password;
+} gw_wifi_ap_credential_t;
+static const gw_wifi_ap_credential_t *GW_WIFI_APS = NULL;
+static const size_t GW_WIFI_APS_COUNT = 0;
+#endif
 
 static const char *TAG = "gw_wifi";
 

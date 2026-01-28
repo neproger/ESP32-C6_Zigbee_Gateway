@@ -31,3 +31,9 @@ CONFIG_ZB_ENABLED=y
 CONFIG_ZB_ZCZR=y
 # end of Zboss
 # end of Component config
+
+#
+# Serial flasher config
+#
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
