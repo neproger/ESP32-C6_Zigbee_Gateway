@@ -144,6 +144,26 @@ static int gw_wifi_candidate_cmp_desc_rssi(const void *a, const void *b)
     return (cb->rssi - ca->rssi);
 }
 
+static void gw_wifi_log_scan_results(const wifi_ap_record_t *records, uint16_t count)
+{
+    if (records == NULL || count == 0) {
+        return;
+    }
+
+    const uint16_t max_dump = (count > 50) ? 50 : count;
+    ESP_LOGI(TAG, "Scan results (%u total, dumping %u):", (unsigned)count, (unsigned)max_dump);
+    for (uint16_t i = 0; i < max_dump; i++) {
+        char ssid[33];
+        memcpy(ssid, records[i].ssid, 32);
+        ssid[32] = '\0';
+        ESP_LOGI(TAG, "  [%u] rssi=%d chan=%u ssid=\"%s\"", (unsigned)i, records[i].rssi, (unsigned)records[i].primary, ssid);
+    }
+
+    if (count > max_dump) {
+        ESP_LOGI(TAG, "  ... (%u more)", (unsigned)(count - max_dump));
+    }
+}
+
 static esp_err_t gw_wifi_scan_build_candidates(gw_wifi_candidate_t *candidates, size_t candidates_cap, size_t *out_count)
 {
     ESP_RETURN_ON_FALSE(candidates != NULL && out_count != NULL, ESP_ERR_INVALID_ARG, TAG, "Invalid args");
@@ -163,8 +183,8 @@ static esp_err_t gw_wifi_scan_build_candidates(gw_wifi_candidate_t *candidates, 
     }
 
     uint16_t fetch_num = ap_num;
-    if (fetch_num > 50) {
-        fetch_num = 50;
+    if (fetch_num > 200) {
+        fetch_num = 200;
     }
 
     wifi_ap_record_t *records = (wifi_ap_record_t *)calloc(fetch_num, sizeof(wifi_ap_record_t));
@@ -201,13 +221,16 @@ static esp_err_t gw_wifi_scan_build_candidates(gw_wifi_candidate_t *candidates, 
         }
     }
 
-    free(records);
-
     if (*out_count == 0) {
-        ESP_LOGW(TAG, "No known SSIDs found in scan results");
+        ESP_LOGW(TAG, "No known SSIDs found in scan results (configured=%u, scanned=%u, fetched=%u)",
+                 (unsigned)GW_WIFI_APS_COUNT, (unsigned)ap_num, (unsigned)fetch_num);
+        gw_wifi_log_scan_results(records, fetch_num);
         gw_event_bus_publish("wifi_scan", "wifi", "", 0, "no known SSIDs found in scan results");
+        free(records);
         return ESP_OK;
     }
+
+    free(records);
 
     qsort(candidates, *out_count, sizeof(candidates[0]), gw_wifi_candidate_cmp_desc_rssi);
     return ESP_OK;

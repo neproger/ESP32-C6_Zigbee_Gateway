@@ -16,8 +16,8 @@ typedef struct
 } gw_wifi_ap_credential_t;
 
 static const gw_wifi_ap_credential_t GW_WIFI_APS[] = {
-    {.ssid = "ITpod", .password = "zxcxzzxc"},
-    {.ssid = "MERCUSYS_0348", .password = "18188530"},
+    {.ssid = "ssid", .password = "pswrd"},
+    {.ssid = "ssid2", .password = "pswrd2"},
 };
 
 static const size_t GW_WIFI_APS_COUNT = sizeof(GW_WIFI_APS) / sizeof(GW_WIFI_APS[0]);
