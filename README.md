@@ -5,6 +5,14 @@
 
 This example demonstrates how to build a Zigbee Gateway device.
 
+## Project docs (this repo)
+
+- `docs/index.md` — documentation index
+- `docs/getting-started.md` — build/flash + Wi‑Fi config + Web UI
+- `docs/api.md` — current HTTP API (as-is)
+- `docs/troubleshooting.md` — common issues
+- `docs/architecture.md` — target architecture (to-be)
+
 The ESP Zigbee SDK provides more examples and tools for productization:
 * [ESP Zigbee SDK Docs](https://docs.espressif.com/projects/esp-zigbee-sdk)
 * [ESP Zigbee SDK Repo](https://github.com/espressif/esp-zigbee-sdk)

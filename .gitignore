@@ -73,6 +73,7 @@ Desktop.ini
 
 # User-specific configuration files
 .vscode/
+main/wifi_aps_config.h
 *.user
 *.workspace # General workspace files, can be from various tools
 *.suo       # Visual Studio Solution User Options

@@ -9,6 +9,21 @@
 - Движок правил (автоматизации)
 - Опциональная интеграция через MQTT **клиент** (брокер внешний)
 
+## Статус реализации (as-is)
+
+Состояние репозитория на данный момент:
+
+- Реализовано: базовый `gw_core` (реестр устройств), `gw_http` (минимальный UI + `GET/POST /api/devices`), Wi‑Fi STA с попыткой подключения к известным точкам (см. `main/wifi_aps_config.h`), печать IP и ссылки на UI.
+- Не реализовано (в архитектуре описано как “целевое”): `gw_zigbee` как отдельный менеджер/очередь команд, `gw_storage`, `gw_mqtt`, SSE `/api/events`, правила и полноценный API.
+
+Связанные документы:
+- Быстрый старт: `docs/getting-started.md`
+- Индекс: `docs/index.md`
+- Текущее состояние (as-is): `docs/current-state.md`
+- API (as-is): `docs/api.md`
+- Troubleshooting: `docs/troubleshooting.md`
+- План работ: `docs/roadmap.md`
+
 ## Цели (MVP)
 
 - Подключать (pair/join) Zigbee устройства из Web UI (“разрешить присоединение / permit join”).

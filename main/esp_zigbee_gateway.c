@@ -25,10 +25,10 @@
 #include "esp_vfs_eventfd.h"
 #include "esp_wifi.h"
 #include "nvs_flash.h"
-#include "protocol_examples_common.h"
 #include "esp_zigbee_gateway.h"
 #include "zb_config_platform.h"
 
+#include "gw_wifi.h"
 #include "gw_core/device_registry.h"
 #include "gw_http/gw_http.h"
 
@@ -73,13 +73,6 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
 
     switch (sig_type) {
     case ESP_ZB_ZDO_SIGNAL_SKIP_STARTUP:
-#if CONFIG_EXAMPLE_CONNECT_WIFI
-#if CONFIG_ESP_COEX_SW_COEXIST_ENABLE
-        esp_coex_wifi_i154_enable();
-#endif /* CONFIG_ESP_COEX_SW_COEXIST_ENABLE */
-        ESP_RETURN_ON_FALSE(example_connect() == ESP_OK, , TAG, "Failed to connect to Wi-Fi");
-        ESP_RETURN_ON_FALSE(esp_wifi_set_ps(WIFI_PS_MIN_MODEM) == ESP_OK, , TAG, "Failed to set Wi-Fi minimum modem power save type");
-#endif /* CONFIG_EXAMPLE_CONNECT_WIFI */
         ESP_LOGI(TAG, "Initialize Zigbee stack");
         esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_INITIALIZATION);
         break;
@@ -179,6 +172,18 @@ void app_main(void)
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+#if CONFIG_ESP_COEX_SW_COEXIST_ENABLE
+    esp_coex_wifi_i154_enable();
+#endif /* CONFIG_ESP_COEX_SW_COEXIST_ENABLE */
+
+    esp_err_t wifi_err = gw_wifi_connect_multi();
+    if (wifi_err != ESP_OK) {
+        ESP_LOGW(TAG, "Wi-Fi not connected (%s)", esp_err_to_name(wifi_err));
+    } else {
+        ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_MIN_MODEM));
+    }
+
     ESP_ERROR_CHECK(gw_device_registry_init());
     ESP_ERROR_CHECK(gw_http_start());
 #if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG

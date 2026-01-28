@@ -45,6 +45,9 @@
 - старт `gw_core`, затем `gw_storage`, `gw_zigbee`, `gw_http` (и опционально `gw_mqtt`)
 - “склейка” конфигов и порядок запуска
 
+Примечание (as-is): сейчас Wi‑Fi логика живёт в `main/gw_wifi.c`, а конфиг точек доступа задаётся в локальном
+`main/wifi_aps_config.h` (файл игнорируется git’ом).
+
 ## Разделение исходников внутри компонентов
 
 Пример для `gw_core/src/`:
@@ -56,6 +59,11 @@
 ## Где держать формат API и событий
 
 - Спецификация internal events: `docs/architecture.md`
-- Спецификация REST API: `docs/architecture.md` (позже вынести в `docs/api.md`)
+- Спецификация REST API (as-is): `docs/api.md`
+- Спецификация REST API (to-be): `docs/architecture.md` (“Черновик REST API”)
 - Версия форматов (если нужно): `docs/protocol.md`
+
+Смотри также:
+- `docs/index.md`
+- `docs/current-state.md`
 

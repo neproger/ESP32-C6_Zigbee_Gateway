@@ -10,6 +10,7 @@
 static const char *TAG = "gw_http";
 
 static httpd_handle_t s_server;
+static uint16_t s_server_port;
 
 static const char *INDEX_HTML =
     "<!doctype html>\n"
@@ -97,38 +98,62 @@ static esp_err_t index_get_handler(httpd_req_t *req)
 
 static esp_err_t api_devices_get_handler(httpd_req_t *req)
 {
-    (void)req;
-
-    gw_device_t devices[32];
-    size_t count = gw_device_registry_list(devices, sizeof(devices) / sizeof(devices[0]));
-
-    // Minimal JSON serialization to avoid bringing full JSON libs right now.
-    // Output example: [{"device_uid":"0x..","name":"..","short_addr":4660,"has_onoff":true,"has_button":false},...]
-    char buf[4096];
-    size_t off = 0;
-    off += (size_t)snprintf(buf + off, sizeof(buf) - off, "[");
-    for (size_t i = 0; i < count && off < sizeof(buf); i++) {
-        const gw_device_t *d = &devices[i];
-        off += (size_t)snprintf(buf + off, sizeof(buf) - off,
-                                "%s{\"device_uid\":\"%s\",\"name\":\"%s\",\"short_addr\":%u,\"has_onoff\":%s,\"has_button\":%s}",
-                                (i == 0 ? "" : ","),
-                                d->device_uid.uid,
-                                d->name,
-                                (unsigned)d->short_addr,
-                                d->has_onoff ? "true" : "false",
-                                d->has_button ? "true" : "false");
-    }
-    if (off < sizeof(buf)) {
-        off += (size_t)snprintf(buf + off, sizeof(buf) - off, "]");
-    } else {
-        // Ensure valid JSON even if truncated
-        buf[sizeof(buf) - 2] = ']';
-        buf[sizeof(buf) - 1] = '\0';
-        off = strlen(buf);
-    }
-
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, buf, (ssize_t)off);
+
+    // Stream JSON in chunks to avoid large on-stack buffers (httpd task stack is small).
+    // Output example: [{"device_uid":"0x..","name":"..","short_addr":4660,"has_onoff":true,"has_button":false},...]
+    const size_t max_devices = 32;
+    gw_device_t *devices = (gw_device_t *)calloc(max_devices, sizeof(gw_device_t));
+    if (devices == NULL) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no mem");
+        return ESP_OK;
+    }
+
+    size_t count = gw_device_registry_list(devices, max_devices);
+
+    esp_err_t err = httpd_resp_sendstr_chunk(req, "[");
+    if (err != ESP_OK) {
+        free(devices);
+        return err;
+    }
+
+    for (size_t i = 0; i < count; i++) {
+        const gw_device_t *d = &devices[i];
+        char line[192];
+        int n = snprintf(line,
+                         sizeof(line),
+                         "%s{\"device_uid\":\"%s\",\"name\":\"%s\",\"short_addr\":%u,\"has_onoff\":%s,\"has_button\":%s}",
+                         (i == 0 ? "" : ","),
+                         d->device_uid.uid,
+                         d->name,
+                         (unsigned)d->short_addr,
+                         d->has_onoff ? "true" : "false",
+                         d->has_button ? "true" : "false");
+        if (n < 0) {
+            free(devices);
+            httpd_resp_sendstr_chunk(req, NULL);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "format error");
+            return ESP_OK;
+        }
+
+        // Truncation is acceptable for now (best-effort debugging UI).
+        err = httpd_resp_sendstr_chunk(req, line);
+        if (err != ESP_OK) {
+            free(devices);
+            httpd_resp_sendstr_chunk(req, NULL);
+            return err;
+        }
+    }
+
+    free(devices);
+
+    err = httpd_resp_sendstr_chunk(req, "]");
+    if (err != ESP_OK) {
+        httpd_resp_sendstr_chunk(req, NULL);
+        return err;
+    }
+
+    return httpd_resp_sendstr_chunk(req, NULL);
 }
 
 static const char *find_query_value(const char *query, const char *key, char *out, size_t out_size)
@@ -205,10 +230,12 @@ esp_err_t gw_http_start(void)
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.uri_match_fn = httpd_uri_match_wildcard;
+    s_server_port = config.server_port;
 
     esp_err_t err = httpd_start(&s_server, &config);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_start failed: %s", esp_err_to_name(err));
+        s_server_port = 0;
         return err;
     }
 
@@ -235,7 +262,11 @@ esp_err_t gw_http_start(void)
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &api_devices_get_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &api_devices_post_uri));
 
-    ESP_LOGI(TAG, "HTTP server started");
+    if (s_server_port != 0) {
+        ESP_LOGI(TAG, "HTTP server started (port %u)", (unsigned)s_server_port);
+    } else {
+        ESP_LOGI(TAG, "HTTP server started");
+    }
     return ESP_OK;
 }
 
@@ -246,6 +277,12 @@ esp_err_t gw_http_stop(void)
     }
     esp_err_t err = httpd_stop(s_server);
     s_server = NULL;
+    s_server_port = 0;
     return err;
+}
+
+uint16_t gw_http_get_port(void)
+{
+    return s_server_port;
 }
 
