@@ -72,6 +72,7 @@ ehthumbs.db
 Desktop.ini
 
 # User-specific configuration files
+dependencies.lock
 .vscode/
 main/wifi_aps_config.h
 *.user
