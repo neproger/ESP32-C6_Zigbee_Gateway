@@ -20,6 +20,7 @@
 
 #include "gw_core/event_bus.h"
 #include "gw_core/device_registry.h"
+#include "gw_core/zb_classify.h"
 #include "gw_core/zb_model.h"
 
 static const char *TAG = "gw_zigbee";
@@ -119,30 +120,33 @@ static void simple_desc_cb(esp_zb_zdp_status_t zdo_status, esp_zb_af_simple_desc
     char uid[GW_DEVICE_UID_STRLEN];
     ieee_to_uid_str(ctx->ieee, uid);
 
-    // Store the discovered endpoint model for UI/debugging.
-    {
-        gw_zb_endpoint_t ep = {0};
-        strlcpy(ep.uid.uid, uid, sizeof(ep.uid.uid));
-        ep.short_addr = ctx->short_addr;
-        ep.endpoint = simple_desc->endpoint;
-        ep.profile_id = simple_desc->app_profile_id;
-        ep.device_id = simple_desc->app_device_id;
-        ep.in_cluster_count = (simple_desc->app_input_cluster_count > GW_ZB_MAX_CLUSTERS) ? GW_ZB_MAX_CLUSTERS : simple_desc->app_input_cluster_count;
-        ep.out_cluster_count = (simple_desc->app_output_cluster_count > GW_ZB_MAX_CLUSTERS) ? GW_ZB_MAX_CLUSTERS : simple_desc->app_output_cluster_count;
-        memcpy(ep.in_clusters, in_clusters, ep.in_cluster_count * sizeof(ep.in_clusters[0]));
-        memcpy(ep.out_clusters, out_clusters, ep.out_cluster_count * sizeof(ep.out_clusters[0]));
-        (void)gw_zb_model_upsert_endpoint(&ep);
-    }
+    gw_zb_endpoint_t ep = {0};
+    strlcpy(ep.uid.uid, uid, sizeof(ep.uid.uid));
+    ep.short_addr = ctx->short_addr;
+    ep.endpoint = simple_desc->endpoint;
+    ep.profile_id = simple_desc->app_profile_id;
+    ep.device_id = simple_desc->app_device_id;
+    ep.in_cluster_count =
+        (simple_desc->app_input_cluster_count > GW_ZB_MAX_CLUSTERS) ? GW_ZB_MAX_CLUSTERS : simple_desc->app_input_cluster_count;
+    ep.out_cluster_count =
+        (simple_desc->app_output_cluster_count > GW_ZB_MAX_CLUSTERS) ? GW_ZB_MAX_CLUSTERS : simple_desc->app_output_cluster_count;
+    memcpy(ep.in_clusters, in_clusters, ep.in_cluster_count * sizeof(ep.in_clusters[0]));
+    memcpy(ep.out_clusters, out_clusters, ep.out_cluster_count * sizeof(ep.out_clusters[0]));
+    const char *kind = gw_zb_endpoint_kind(&ep);
 
-    char msg[128];
+    // Store the discovered endpoint model for UI/debugging.
+    (void)gw_zb_model_upsert_endpoint(&ep);
+
+    char msg[160];
     (void)snprintf(msg,
                    sizeof(msg),
-                   "ep=%u profile=0x%04x dev=0x%04x in=%u out=%u groups=%d onoff_srv=%d onoff_cli=%d",
+                   "ep=%u profile=0x%04x dev=0x%04x in=%u out=%u kind=%s groups=%d onoff_srv=%d onoff_cli=%d",
                    (unsigned)simple_desc->endpoint,
                    (unsigned)simple_desc->app_profile_id,
                    (unsigned)simple_desc->app_device_id,
                    (unsigned)simple_desc->app_input_cluster_count,
                    (unsigned)simple_desc->app_output_cluster_count,
+                   kind,
                    has_groups_srv ? 1 : 0,
                    has_onoff_srv ? 1 : 0,
                    has_onoff_cli ? 1 : 0);
@@ -433,6 +437,15 @@ static void leave_resp_cb(esp_zb_zdp_status_t zdo_status, void *user_ctx)
                          ctx->uid.uid,
                          ctx->short_addr,
                          msg);
+    {
+        char payload[128];
+        (void)snprintf(payload,
+                       sizeof(payload),
+                       "{\"status\":\"0x%02x\",\"rejoin\":%s}",
+                       (unsigned)zdo_status,
+                       ctx->rejoin ? "true" : "false");
+        gw_event_bus_publish_json("device.leave", "zigbee", ctx->uid.uid, ctx->short_addr, payload);
+    }
     free(ctx);
 }
 
@@ -608,6 +621,11 @@ void gw_zigbee_on_device_annce(const uint8_t ieee_addr[8], uint16_t short_addr, 
         char msg[64];
         (void)snprintf(msg, sizeof(msg), "cap=0x%02x", (unsigned)capability);
         gw_event_bus_publish("zigbee_device_annce", "zigbee", d.device_uid.uid, d.short_addr, msg);
+    }
+    {
+        char payload[96];
+        (void)snprintf(payload, sizeof(payload), "{\"cap\":\"0x%02x\"}", (unsigned)capability);
+        gw_event_bus_publish_json("device.join", "zigbee", d.device_uid.uid, d.short_addr, payload);
     }
 
     // Discover device endpoints/clusters and auto-assign it to a type group.

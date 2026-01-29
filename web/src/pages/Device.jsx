@@ -6,6 +6,10 @@ function renderSensorValue(s) {
   return formatSensorValue(s)
 }
 
+function listToText(v) {
+  return Array.isArray(v) ? v.map((x) => String(x ?? '')).filter(Boolean).join(', ') : ''
+}
+
 export default function Device() {
   const { uid } = useParams()
   const [device, setDevice] = useState(null)
@@ -87,8 +91,12 @@ export default function Device() {
           <thead>
             <tr>
               <th>Endpoint</th>
+              <th>Kind</th>
               <th>Profile</th>
               <th>Device</th>
+              <th>Accepts</th>
+              <th>Emits</th>
+              <th>Reports</th>
               <th>In clusters</th>
               <th>Out clusters</th>
             </tr>
@@ -96,7 +104,7 @@ export default function Device() {
           <tbody>
             {sortedEndpoints.length === 0 ? (
               <tr>
-                <td colSpan={5} className="muted">
+                <td colSpan={9} className="muted">
                   No endpoints discovered yet.
                 </td>
               </tr>
@@ -106,6 +114,7 @@ export default function Device() {
                   <td>
                     <code>{String(e?.endpoint ?? '')}</code>
                   </td>
+                  <td className="muted">{String(e?.kind ?? '')}</td>
                   <td className="muted">
                     {hex16(e?.profile_id)}
                     {describeProfile(e?.profile_id)?.name ? ` (${describeProfile(e?.profile_id).name})` : ''}
@@ -114,6 +123,9 @@ export default function Device() {
                     {hex16(e?.device_id)}
                     {describeDeviceId(e?.device_id)?.name ? ` (${describeDeviceId(e?.device_id).name})` : ''}
                   </td>
+                  <td className="mono">{listToText(e?.accepts)}</td>
+                  <td className="mono">{listToText(e?.emits)}</td>
+                  <td className="mono">{listToText(e?.reports)}</td>
                   <td className="mono">
                     {Array.isArray(e?.in_clusters)
                       ? e.in_clusters

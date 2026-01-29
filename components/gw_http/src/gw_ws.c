@@ -129,20 +129,33 @@ static void ws_send_events_since(int fd, uint32_t since, size_t limit)
     size_t count = gw_event_bus_list_since(since, events, limit, &last_id);
     for (size_t i = 0; i < count; i++) {
         const gw_event_t *e = &events[i];
-        char msg[320];
-        int n = snprintf(msg,
-                         sizeof(msg),
-                         "{\"t\":\"event\",\"id\":%u,\"ts_ms\":%llu,\"type\":\"%s\",\"source\":\"%s\",\"device_uid\":\"%s\",\"short_addr\":%u,\"msg\":\"%s\"}",
-                         (unsigned)e->id,
-                         (unsigned long long)e->ts_ms,
-                         e->type,
-                         e->source,
-                         e->device_uid,
-                         (unsigned)e->short_addr,
-                         e->msg);
-        if (n > 0 && (size_t)n < sizeof(msg)) {
-            (void)ws_send_json_async(fd, msg);
+        cJSON *o = cJSON_CreateObject();
+        if (!o) {
+            continue;
         }
+        cJSON_AddStringToObject(o, "t", "event");
+        cJSON_AddNumberToObject(o, "id", (double)e->id);
+        cJSON_AddNumberToObject(o, "ts_ms", (double)e->ts_ms);
+        cJSON_AddStringToObject(o, "type", e->type);
+        cJSON_AddStringToObject(o, "source", e->source);
+        cJSON_AddStringToObject(o, "device_uid", e->device_uid);
+        cJSON_AddNumberToObject(o, "short_addr", (double)e->short_addr);
+        cJSON_AddStringToObject(o, "msg", e->msg);
+
+        // If msg looks like JSON, also expose it as payload for normalized events.
+        if (e->msg[0] == '{' || e->msg[0] == '[') {
+            cJSON *p = cJSON_Parse(e->msg);
+            if (p) {
+                cJSON_AddItemToObject(o, "payload", p);
+            }
+        }
+
+        char *s = cJSON_PrintUnformatted(o);
+        if (s) {
+            (void)ws_send_json_async(fd, s);
+            cJSON_free(s);
+        }
+        cJSON_Delete(o);
     }
 
     free(events);
@@ -166,18 +179,30 @@ static void ws_publish_event_to_clients(const gw_event_t *e, void *user_ctx)
     }
     portEXIT_CRITICAL(&s_client_lock);
 
-    char msg[320];
-    int n = snprintf(msg,
-                     sizeof(msg),
-                     "{\"t\":\"event\",\"id\":%u,\"ts_ms\":%llu,\"type\":\"%s\",\"source\":\"%s\",\"device_uid\":\"%s\",\"short_addr\":%u,\"msg\":\"%s\"}",
-                     (unsigned)e->id,
-                     (unsigned long long)e->ts_ms,
-                     e->type,
-                     e->source,
-                     e->device_uid,
-                     (unsigned)e->short_addr,
-                     e->msg);
-    if (n <= 0 || (size_t)n >= sizeof(msg)) {
+    cJSON *o = cJSON_CreateObject();
+    if (!o) {
+        return;
+    }
+
+    cJSON_AddStringToObject(o, "t", "event");
+    cJSON_AddNumberToObject(o, "id", (double)e->id);
+    cJSON_AddNumberToObject(o, "ts_ms", (double)e->ts_ms);
+    cJSON_AddStringToObject(o, "type", e->type);
+    cJSON_AddStringToObject(o, "source", e->source);
+    cJSON_AddStringToObject(o, "device_uid", e->device_uid);
+    cJSON_AddNumberToObject(o, "short_addr", (double)e->short_addr);
+    cJSON_AddStringToObject(o, "msg", e->msg);
+
+    if (e->msg[0] == '{' || e->msg[0] == '[') {
+        cJSON *p = cJSON_Parse(e->msg);
+        if (p) {
+            cJSON_AddItemToObject(o, "payload", p);
+        }
+    }
+
+    char *s = cJSON_PrintUnformatted(o);
+    if (!s) {
+        cJSON_Delete(o);
         return;
     }
 
@@ -187,8 +212,11 @@ static void ws_publish_event_to_clients(const gw_event_t *e, void *user_ctx)
             ws_client_remove_fd(fd);
             continue;
         }
-        (void)ws_send_json_async(fd, msg);
+        (void)ws_send_json_async(fd, s);
     }
+
+    cJSON_free(s);
+    cJSON_Delete(o);
 }
 
 static void ws_send_rsp(int fd, cJSON *id, bool ok, const char *err)

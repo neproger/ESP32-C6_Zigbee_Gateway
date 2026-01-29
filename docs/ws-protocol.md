@@ -73,9 +73,13 @@ Streamed when subscribed to `events`:
   "source": "zb",
   "device_uid": "00124b...",
   "short_addr": 581,
-  "msg": "..."
+  "msg": "...",
+  "payload": {}
 }
 ```
+
+Notes:
+- `payload` is optional. For normalized events the gateway sends it as a JSON object (parsed from `msg` when `msg` contains JSON).
 
 ### `rsp`
 

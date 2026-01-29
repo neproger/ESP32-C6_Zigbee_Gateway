@@ -43,6 +43,8 @@ esp_err_t gw_event_bus_post(gw_event_id_t id, const void *data, size_t data_size
 // Lightweight, in-memory event log for UI/debugging.
 uint32_t gw_event_bus_last_id(void);
 void gw_event_bus_publish(const char *type, const char *source, const char *device_uid, uint16_t short_addr, const char *msg);
+// Helper: publish a JSON payload string as msg (for normalized events).
+void gw_event_bus_publish_json(const char *type, const char *source, const char *device_uid, uint16_t short_addr, const char *payload_json);
 size_t gw_event_bus_list_since(uint32_t since_id, gw_event_t *out, size_t max_out, uint32_t *out_last_id);
 
 // Optional listeners called for each gw_event_bus_publish(). Keep callbacks fast and non-blocking.

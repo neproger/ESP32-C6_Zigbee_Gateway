@@ -1,5 +1,7 @@
 #include "gw_core/device_registry.h"
 
+#include <ctype.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -24,6 +26,90 @@ typedef struct {
     uint16_t count;
     gw_device_t devices[32];
 } gw_device_registry_blob_t;
+
+static bool is_prefix_number_name(const char *name, const char *prefix, uint32_t *out_n)
+{
+    if (!name || !prefix || !prefix[0]) {
+        return false;
+    }
+
+    const size_t pre_len = strlen(prefix);
+    if (strncmp(name, prefix, pre_len) != 0) {
+        return false;
+    }
+
+    const char *p = name + pre_len;
+    if (*p == '\0') {
+        return false;
+    }
+
+    uint32_t n = 0;
+    while (*p) {
+        if (!isdigit((unsigned char)*p)) {
+            return false;
+        }
+        n = (n * 10u) + (uint32_t)(*p - '0');
+        p++;
+    }
+
+    if (n == 0) {
+        return false;
+    }
+    if (out_n) {
+        *out_n = n;
+    }
+    return true;
+}
+
+static uint32_t next_name_index_for_prefix(const char *prefix)
+{
+    uint32_t max_n = 0;
+    for (size_t i = 0; i < s_device_count; i++) {
+        uint32_t n = 0;
+        if (is_prefix_number_name(s_devices[i].name, prefix, &n)) {
+            if (n > max_n) {
+                max_n = n;
+            }
+        }
+    }
+    return max_n + 1;
+}
+
+static const char *pick_default_prefix(const gw_device_t *d)
+{
+    if (d && d->has_button) {
+        return "switch";
+    }
+    if (d && d->has_onoff) {
+        return "relay";
+    }
+    return "device";
+}
+
+static void assign_default_name_if_needed(gw_device_t *d)
+{
+    if (!d) {
+        return;
+    }
+
+    // If we already have a user-provided name, keep it.
+    if (d->name[0] != '\0') {
+        // Optionally upgrade auto-generic deviceN -> relayN/switchN once capabilities are known.
+        uint32_t n = 0;
+        if ((d->has_button || d->has_onoff) && is_prefix_number_name(d->name, "device", &n)) {
+            const char *prefix = pick_default_prefix(d);
+            if (strcmp(prefix, "device") != 0) {
+                uint32_t next = next_name_index_for_prefix(prefix);
+                (void)snprintf(d->name, sizeof(d->name), "%s%u", prefix, (unsigned)next);
+            }
+        }
+        return;
+    }
+
+    const char *prefix = pick_default_prefix(d);
+    uint32_t next = next_name_index_for_prefix(prefix);
+    (void)snprintf(d->name, sizeof(d->name), "%s%u", prefix, (unsigned)next);
+}
 
 static esp_err_t save_to_nvs(void)
 {
@@ -112,7 +198,15 @@ esp_err_t gw_device_registry_upsert(const gw_device_t *device)
     portENTER_CRITICAL(&s_lock);
     size_t idx = find_device_index(&device->device_uid);
     if (idx != (size_t)-1) {
-        s_devices[idx] = *device;
+        gw_device_t tmp = *device;
+        if (tmp.name[0] == '\0') {
+            // Preserve existing name unless caller explicitly sets it.
+            strlcpy(tmp.name, s_devices[idx].name, sizeof(tmp.name));
+        }
+
+        // Assign a default name if missing (or upgrade generic deviceN to a typed name).
+        assign_default_name_if_needed(&tmp);
+        s_devices[idx] = tmp;
         portEXIT_CRITICAL(&s_lock);
         return save_to_nvs();
     }
@@ -122,7 +216,9 @@ esp_err_t gw_device_registry_upsert(const gw_device_t *device)
         return ESP_ERR_NO_MEM;
     }
 
-    s_devices[s_device_count++] = *device;
+    gw_device_t tmp = *device;
+    assign_default_name_if_needed(&tmp);
+    s_devices[s_device_count++] = tmp;
     portEXIT_CRITICAL(&s_lock);
 
     err = save_to_nvs();

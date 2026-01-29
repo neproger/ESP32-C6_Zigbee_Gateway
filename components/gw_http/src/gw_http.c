@@ -9,9 +9,12 @@
 #include "esp_log.h"
 #include "esp_spiffs.h"
 
+#include "cJSON.h"
+
 #include "gw_core/device_registry.h"
 #include "gw_core/event_bus.h"
 #include "gw_core/sensor_store.h"
+#include "gw_core/zb_classify.h"
 #include "gw_core/zb_model.h"
 #include "gw_zigbee/gw_zigbee.h"
 #include "gw_http/gw_ws.h"
@@ -269,92 +272,93 @@ static esp_err_t api_endpoints_get_handler(httpd_req_t *req)
 
     size_t count = gw_zb_model_list_endpoints(&uid, eps, max_eps);
 
-    httpd_resp_set_type(req, "application/json");
-    esp_err_t err = httpd_resp_sendstr_chunk(req, "[");
-    if (err != ESP_OK) {
+    // Avoid large stack frames in the httpd task.
+    char *accepts = (char *)malloc(1024);
+    char *emits = (char *)malloc(1024);
+    char *reports = (char *)malloc(1024);
+    if (!accepts || !emits || !reports) {
+        free(accepts);
+        free(emits);
+        free(reports);
         free(eps);
-        return err;
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no mem");
+        return ESP_OK;
+    }
+
+    cJSON *arr = cJSON_CreateArray();
+    if (!arr) {
+        free(accepts);
+        free(emits);
+        free(reports);
+        free(eps);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no mem");
+        return ESP_OK;
     }
 
     for (size_t i = 0; i < count; i++) {
         const gw_zb_endpoint_t *e = &eps[i];
-        char head[96];
-        int n = snprintf(head,
-                         sizeof(head),
-                         "%s{\"endpoint\":%u,\"profile_id\":%u,\"device_id\":%u,\"in_clusters\":[",
-                         (i == 0 ? "" : ","),
-                         (unsigned)e->endpoint,
-                         (unsigned)e->profile_id,
-                         (unsigned)e->device_id);
-        if (n < 0) {
+
+        cJSON *o = cJSON_CreateObject();
+        if (!o) {
+            cJSON_Delete(arr);
+            free(accepts);
+            free(emits);
+            free(reports);
             free(eps);
-            httpd_resp_sendstr_chunk(req, NULL);
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "format error");
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no mem");
             return ESP_OK;
         }
-        err = httpd_resp_sendstr_chunk(req, head);
-        if (err != ESP_OK) {
-            free(eps);
-            httpd_resp_sendstr_chunk(req, NULL);
-            return err;
-        }
 
+        cJSON_AddNumberToObject(o, "endpoint", (double)e->endpoint);
+        cJSON_AddNumberToObject(o, "profile_id", (double)e->profile_id);
+        cJSON_AddNumberToObject(o, "device_id", (double)e->device_id);
+
+        cJSON *in = cJSON_AddArrayToObject(o, "in_clusters");
         for (uint8_t c = 0; c < e->in_cluster_count; c++) {
-            char t[16];
-            n = snprintf(t, sizeof(t), "%s%u", (c == 0 ? "" : ","), (unsigned)e->in_clusters[c]);
-            if (n < 0) {
-                free(eps);
-                httpd_resp_sendstr_chunk(req, NULL);
-                httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "format error");
-                return ESP_OK;
-            }
-            err = httpd_resp_sendstr_chunk(req, t);
-            if (err != ESP_OK) {
-                free(eps);
-                httpd_resp_sendstr_chunk(req, NULL);
-                return err;
-            }
+            cJSON_AddItemToArray(in, cJSON_CreateNumber((double)e->in_clusters[c]));
         }
-
-        err = httpd_resp_sendstr_chunk(req, "],\"out_clusters\":[");
-        if (err != ESP_OK) {
-            free(eps);
-            httpd_resp_sendstr_chunk(req, NULL);
-            return err;
-        }
-
+        cJSON *out = cJSON_AddArrayToObject(o, "out_clusters");
         for (uint8_t c = 0; c < e->out_cluster_count; c++) {
-            char t[16];
-            n = snprintf(t, sizeof(t), "%s%u", (c == 0 ? "" : ","), (unsigned)e->out_clusters[c]);
-            if (n < 0) {
-                free(eps);
-                httpd_resp_sendstr_chunk(req, NULL);
-                httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "format error");
-                return ESP_OK;
-            }
-            err = httpd_resp_sendstr_chunk(req, t);
-            if (err != ESP_OK) {
-                free(eps);
-                httpd_resp_sendstr_chunk(req, NULL);
-                return err;
-            }
+            cJSON_AddItemToArray(out, cJSON_CreateNumber((double)e->out_clusters[c]));
         }
 
-        err = httpd_resp_sendstr_chunk(req, "]}");
-        if (err != ESP_OK) {
-            free(eps);
-            httpd_resp_sendstr_chunk(req, NULL);
-            return err;
+        cJSON_AddStringToObject(o, "kind", gw_zb_endpoint_kind(e));
+        {
+            gw_zb_endpoint_accepts_json(e, accepts, 1024);
+            gw_zb_endpoint_emits_json(e, emits, 1024);
+            gw_zb_endpoint_reports_json(e, reports, 1024);
+
+            cJSON *a = cJSON_Parse(accepts);
+            cJSON *m = cJSON_Parse(emits);
+            cJSON *r = cJSON_Parse(reports);
+
+            if (!a) a = cJSON_CreateArray();
+            if (!m) m = cJSON_CreateArray();
+            if (!r) r = cJSON_CreateArray();
+
+            if (a) cJSON_AddItemToObject(o, "accepts", a);
+            if (m) cJSON_AddItemToObject(o, "emits", m);
+            if (r) cJSON_AddItemToObject(o, "reports", r);
         }
+
+        cJSON_AddItemToArray(arr, o);
     }
 
+    char *s = cJSON_PrintUnformatted(arr);
+    cJSON_Delete(arr);
+    free(accepts);
+    free(emits);
+    free(reports);
     free(eps);
-    err = httpd_resp_sendstr_chunk(req, "]");
-    if (err != ESP_OK) {
-        httpd_resp_sendstr_chunk(req, NULL);
-        return err;
+    if (!s) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no mem");
+        return ESP_OK;
     }
-    return httpd_resp_sendstr_chunk(req, NULL);
+
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t err = httpd_resp_send(req, s, HTTPD_RESP_USE_STRLEN);
+    cJSON_free(s);
+    return err;
 }
 
 static esp_err_t api_sensors_get_handler(httpd_req_t *req)

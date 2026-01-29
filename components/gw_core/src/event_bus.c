@@ -133,6 +133,12 @@ void gw_event_bus_publish(const char *type, const char *source, const char *devi
              e.msg[0] ? e.msg : "-");
 }
 
+void gw_event_bus_publish_json(const char *type, const char *source, const char *device_uid, uint16_t short_addr, const char *payload_json)
+{
+    // For now, JSON payloads are stored in gw_event_t.msg (string) and are JSON-escaped at the transport layer (WS/HTTP).
+    gw_event_bus_publish(type, source, device_uid, short_addr, payload_json);
+}
+
 size_t gw_event_bus_list_since(uint32_t since_id, gw_event_t *out, size_t max_out, uint32_t *out_last_id)
 {
     if (!s_inited || out == NULL || max_out == 0) {

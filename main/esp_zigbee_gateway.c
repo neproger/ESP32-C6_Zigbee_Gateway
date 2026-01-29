@@ -111,6 +111,53 @@ static esp_err_t zb_core_action_handler(esp_zb_core_action_callback_id_t callbac
             gw_event_bus_publish("zigbee_attr_report", "zigbee", uid.uid, src_short, msg);
         }
 
+        // Normalized event (for automations): zigbee.attr_report
+        {
+            char payload[160];
+            if (cluster_id == ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT && attr_id == ESP_ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID &&
+                m->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_S16 && m->attribute.data.size >= 2 && m->attribute.data.value != NULL) {
+                const int16_t v = *((const int16_t *)m->attribute.data.value);
+                (void)snprintf(payload,
+                               sizeof(payload),
+                               "{\"endpoint\":%u,\"cluster\":\"0x%04x\",\"attr\":\"0x%04x\",\"value\":%d,\"unit\":\"cC\"}",
+                               (unsigned)m->src_endpoint,
+                               (unsigned)cluster_id,
+                               (unsigned)attr_id,
+                               (int)v);
+            } else if (cluster_id == ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT && attr_id == ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID &&
+                       m->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_U16 && m->attribute.data.size >= 2 && m->attribute.data.value != NULL) {
+                const uint16_t v = *((const uint16_t *)m->attribute.data.value);
+                (void)snprintf(payload,
+                               sizeof(payload),
+                               "{\"endpoint\":%u,\"cluster\":\"0x%04x\",\"attr\":\"0x%04x\",\"value\":%u,\"unit\":\"cP\"}",
+                               (unsigned)m->src_endpoint,
+                               (unsigned)cluster_id,
+                               (unsigned)attr_id,
+                               (unsigned)v);
+            } else if (cluster_id == ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG &&
+                       attr_id == ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID &&
+                       m->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_U8 && m->attribute.data.size >= 1 && m->attribute.data.value != NULL) {
+                const uint8_t v = *((const uint8_t *)m->attribute.data.value);
+                (void)snprintf(payload,
+                               sizeof(payload),
+                               "{\"endpoint\":%u,\"cluster\":\"0x%04x\",\"attr\":\"0x%04x\",\"value\":%u,\"unit\":\"half_pct\"}",
+                               (unsigned)m->src_endpoint,
+                               (unsigned)cluster_id,
+                               (unsigned)attr_id,
+                               (unsigned)v);
+            } else {
+                (void)snprintf(payload,
+                               sizeof(payload),
+                               "{\"endpoint\":%u,\"cluster\":\"0x%04x\",\"attr\":\"0x%04x\",\"zcl_type\":\"0x%02x\",\"size\":%u}",
+                               (unsigned)m->src_endpoint,
+                               (unsigned)cluster_id,
+                               (unsigned)attr_id,
+                               (unsigned)m->attribute.data.type,
+                               (unsigned)m->attribute.data.size);
+            }
+            gw_event_bus_publish_json("zigbee.attr_report", "zigbee", uid.uid, src_short, payload);
+        }
+
         return ESP_OK;
     }
 
@@ -213,6 +260,17 @@ static esp_err_t zb_core_action_handler(esp_zb_core_action_callback_id_t callbac
                            (unsigned)m->info.src_endpoint,
                            (int)m->info.header.rssi);
             gw_event_bus_publish("zigbee_onoff_toggle", "zigbee", uid.uid, src_short, msg);
+
+            {
+                char payload[160];
+                (void)snprintf(payload,
+                               sizeof(payload),
+                               "{\"cmd\":\"toggle\",\"endpoint\":%u,\"cluster\":\"0x%04x\",\"rssi\":%d}",
+                               (unsigned)m->info.src_endpoint,
+                               (unsigned)ESP_ZB_ZCL_CLUSTER_ID_ON_OFF,
+                               (int)m->info.header.rssi);
+                gw_event_bus_publish_json("zigbee.command", "zigbee", uid.uid, src_short, payload);
+            }
         }
     }
 
