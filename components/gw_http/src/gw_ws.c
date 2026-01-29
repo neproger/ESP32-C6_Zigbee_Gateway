@@ -134,6 +134,7 @@ static void ws_send_events_since(int fd, uint32_t since, size_t limit)
             continue;
         }
         cJSON_AddStringToObject(o, "t", "event");
+        cJSON_AddNumberToObject(o, "v", (double)e->v);
         cJSON_AddNumberToObject(o, "id", (double)e->id);
         cJSON_AddNumberToObject(o, "ts_ms", (double)e->ts_ms);
         cJSON_AddStringToObject(o, "type", e->type);
@@ -142,12 +143,10 @@ static void ws_send_events_since(int fd, uint32_t since, size_t limit)
         cJSON_AddNumberToObject(o, "short_addr", (double)e->short_addr);
         cJSON_AddStringToObject(o, "msg", e->msg);
 
-        // If msg looks like JSON, also expose it as payload for normalized events.
-        if (e->msg[0] == '{' || e->msg[0] == '[') {
-            cJSON *p = cJSON_Parse(e->msg);
-            if (p) {
-                cJSON_AddItemToObject(o, "payload", p);
-            }
+        // Structured payload (no legacy JSON-in-msg fallback).
+        if (e->payload_json[0] != '\0') {
+            cJSON *p = cJSON_Parse(e->payload_json);
+            if (p) cJSON_AddItemToObject(o, "payload", p);
         }
 
         char *s = cJSON_PrintUnformatted(o);
@@ -185,6 +184,7 @@ static void ws_publish_event_to_clients(const gw_event_t *e, void *user_ctx)
     }
 
     cJSON_AddStringToObject(o, "t", "event");
+    cJSON_AddNumberToObject(o, "v", (double)e->v);
     cJSON_AddNumberToObject(o, "id", (double)e->id);
     cJSON_AddNumberToObject(o, "ts_ms", (double)e->ts_ms);
     cJSON_AddStringToObject(o, "type", e->type);
@@ -193,11 +193,9 @@ static void ws_publish_event_to_clients(const gw_event_t *e, void *user_ctx)
     cJSON_AddNumberToObject(o, "short_addr", (double)e->short_addr);
     cJSON_AddStringToObject(o, "msg", e->msg);
 
-    if (e->msg[0] == '{' || e->msg[0] == '[') {
-        cJSON *p = cJSON_Parse(e->msg);
-        if (p) {
-            cJSON_AddItemToObject(o, "payload", p);
-        }
+    if (e->payload_json[0] != '\0') {
+        cJSON *p = cJSON_Parse(e->payload_json);
+        if (p) cJSON_AddItemToObject(o, "payload", p);
     }
 
     char *s = cJSON_PrintUnformatted(o);
@@ -283,6 +281,7 @@ static void ws_handle_req(int fd, cJSON *root)
         for (size_t i = 0; i < count; i++) {
             const gw_event_t *e = &events[i];
             cJSON *je = cJSON_CreateObject();
+            cJSON_AddNumberToObject(je, "v", (double)e->v);
             cJSON_AddNumberToObject(je, "id", (double)e->id);
             cJSON_AddNumberToObject(je, "ts_ms", (double)e->ts_ms);
             cJSON_AddStringToObject(je, "type", e->type);
@@ -290,6 +289,11 @@ static void ws_handle_req(int fd, cJSON *root)
             cJSON_AddStringToObject(je, "device_uid", e->device_uid);
             cJSON_AddNumberToObject(je, "short_addr", (double)e->short_addr);
             cJSON_AddStringToObject(je, "msg", e->msg);
+
+            if (e->payload_json[0] != '\0') {
+                cJSON *p = cJSON_Parse(e->payload_json);
+                if (p) cJSON_AddItemToObject(je, "payload", p);
+            }
             cJSON_AddItemToArray(arr, je);
         }
 
@@ -304,8 +308,13 @@ static void ws_handle_req(int fd, cJSON *root)
     }
 
     if (strcmp(m->valuestring, "automations.list") == 0) {
-        gw_automation_t autos[16] = {0};
-        size_t count = gw_automation_store_list(autos, 16);
+        const size_t max_autos = 16;
+        gw_automation_t *autos = (gw_automation_t *)calloc(max_autos, sizeof(gw_automation_t));
+        if (!autos) {
+            ws_send_rsp(fd, id, false, "no mem");
+            return;
+        }
+        size_t count = gw_automation_store_list(autos, max_autos);
 
         cJSON *o = cJSON_CreateObject();
         cJSON_AddStringToObject(o, "t", "rsp");
@@ -330,6 +339,7 @@ static void ws_handle_req(int fd, cJSON *root)
             cJSON_free(s);
         }
         cJSON_Delete(o);
+        free(autos);
         return;
     }
 
@@ -493,6 +503,165 @@ static void ws_handle_req(int fd, cJSON *root)
             return;
         }
         gw_event_bus_publish("device_renamed", "ws", uid.uid, 0, name_j->valuestring);
+        ws_send_rsp(fd, id, true, NULL);
+        return;
+    }
+
+    if (strcmp(m->valuestring, "devices.onoff") == 0) {
+        cJSON *p = cJSON_GetObjectItemCaseSensitive(root, "p");
+        cJSON *uid_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "uid") : NULL;
+        cJSON *endpoint_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "endpoint") : NULL;
+        cJSON *cmd_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "cmd") : NULL;
+
+        if (!cJSON_IsString(uid_j) || !uid_j->valuestring || uid_j->valuestring[0] == '\0') {
+            ws_send_rsp(fd, id, false, "missing uid");
+            return;
+        }
+        if (!cJSON_IsString(cmd_j) || !cmd_j->valuestring || cmd_j->valuestring[0] == '\0') {
+            ws_send_rsp(fd, id, false, "missing cmd");
+            return;
+        }
+
+        uint8_t endpoint = 1;
+        if (cJSON_IsNumber(endpoint_j) && endpoint_j->valuedouble >= 1 && endpoint_j->valuedouble <= 240) {
+            endpoint = (uint8_t)endpoint_j->valuedouble;
+        }
+
+        gw_zigbee_onoff_cmd_t c = GW_ZIGBEE_ONOFF_CMD_TOGGLE;
+        if (strcmp(cmd_j->valuestring, "on") == 0) {
+            c = GW_ZIGBEE_ONOFF_CMD_ON;
+        } else if (strcmp(cmd_j->valuestring, "off") == 0) {
+            c = GW_ZIGBEE_ONOFF_CMD_OFF;
+        } else if (strcmp(cmd_j->valuestring, "toggle") == 0) {
+            c = GW_ZIGBEE_ONOFF_CMD_TOGGLE;
+        } else {
+            ws_send_rsp(fd, id, false, "bad cmd");
+            return;
+        }
+
+        gw_device_uid_t uid = {0};
+        strlcpy(uid.uid, uid_j->valuestring, sizeof(uid.uid));
+        esp_err_t err = gw_zigbee_onoff_cmd(&uid, endpoint, c);
+        if (err != ESP_OK) {
+            ws_send_rsp(fd, id, false, "onoff failed");
+            return;
+        }
+        ws_send_rsp(fd, id, true, NULL);
+        return;
+    }
+
+    if (strcmp(m->valuestring, "devices.level") == 0) {
+        cJSON *p = cJSON_GetObjectItemCaseSensitive(root, "p");
+        cJSON *uid_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "uid") : NULL;
+        cJSON *endpoint_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "endpoint") : NULL;
+        cJSON *level_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "level") : NULL;
+        cJSON *transition_ms_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "transition_ms") : NULL;
+
+        if (!cJSON_IsString(uid_j) || !uid_j->valuestring || uid_j->valuestring[0] == '\0') {
+            ws_send_rsp(fd, id, false, "missing uid");
+            return;
+        }
+        if (!cJSON_IsNumber(level_j) || level_j->valuedouble < 0 || level_j->valuedouble > 254) {
+            ws_send_rsp(fd, id, false, "bad level");
+            return;
+        }
+
+        uint8_t endpoint = 1;
+        if (cJSON_IsNumber(endpoint_j) && endpoint_j->valuedouble >= 1 && endpoint_j->valuedouble <= 240) {
+            endpoint = (uint8_t)endpoint_j->valuedouble;
+        }
+        uint16_t transition_ms = 0;
+        if (cJSON_IsNumber(transition_ms_j) && transition_ms_j->valuedouble >= 0 && transition_ms_j->valuedouble <= 60000) {
+            transition_ms = (uint16_t)transition_ms_j->valuedouble;
+        }
+
+        gw_device_uid_t uid = {0};
+        strlcpy(uid.uid, uid_j->valuestring, sizeof(uid.uid));
+        gw_zigbee_level_t level = {.level = (uint8_t)level_j->valuedouble, .transition_ms = transition_ms};
+        esp_err_t err = gw_zigbee_level_move_to_level(&uid, endpoint, level);
+        if (err != ESP_OK) {
+            ws_send_rsp(fd, id, false, "level failed");
+            return;
+        }
+        ws_send_rsp(fd, id, true, NULL);
+        return;
+    }
+
+    if (strcmp(m->valuestring, "devices.color_xy") == 0) {
+        cJSON *p = cJSON_GetObjectItemCaseSensitive(root, "p");
+        cJSON *uid_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "uid") : NULL;
+        cJSON *endpoint_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "endpoint") : NULL;
+        cJSON *x_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "x") : NULL;
+        cJSON *y_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "y") : NULL;
+        cJSON *transition_ms_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "transition_ms") : NULL;
+
+        if (!cJSON_IsString(uid_j) || !uid_j->valuestring || uid_j->valuestring[0] == '\0') {
+            ws_send_rsp(fd, id, false, "missing uid");
+            return;
+        }
+        if (!cJSON_IsNumber(x_j) || x_j->valuedouble < 0 || x_j->valuedouble > 65535) {
+            ws_send_rsp(fd, id, false, "bad x");
+            return;
+        }
+        if (!cJSON_IsNumber(y_j) || y_j->valuedouble < 0 || y_j->valuedouble > 65535) {
+            ws_send_rsp(fd, id, false, "bad y");
+            return;
+        }
+
+        uint8_t endpoint = 1;
+        if (cJSON_IsNumber(endpoint_j) && endpoint_j->valuedouble >= 1 && endpoint_j->valuedouble <= 240) {
+            endpoint = (uint8_t)endpoint_j->valuedouble;
+        }
+        uint16_t transition_ms = 0;
+        if (cJSON_IsNumber(transition_ms_j) && transition_ms_j->valuedouble >= 0 && transition_ms_j->valuedouble <= 60000) {
+            transition_ms = (uint16_t)transition_ms_j->valuedouble;
+        }
+
+        gw_device_uid_t uid = {0};
+        strlcpy(uid.uid, uid_j->valuestring, sizeof(uid.uid));
+        gw_zigbee_color_xy_t color = {.x = (uint16_t)x_j->valuedouble, .y = (uint16_t)y_j->valuedouble, .transition_ms = transition_ms};
+        esp_err_t err = gw_zigbee_color_move_to_xy(&uid, endpoint, color);
+        if (err != ESP_OK) {
+            ws_send_rsp(fd, id, false, "color failed");
+            return;
+        }
+        ws_send_rsp(fd, id, true, NULL);
+        return;
+    }
+
+    if (strcmp(m->valuestring, "devices.color_temp") == 0) {
+        cJSON *p = cJSON_GetObjectItemCaseSensitive(root, "p");
+        cJSON *uid_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "uid") : NULL;
+        cJSON *endpoint_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "endpoint") : NULL;
+        cJSON *mireds_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "mireds") : NULL;
+        cJSON *transition_ms_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "transition_ms") : NULL;
+
+        if (!cJSON_IsString(uid_j) || !uid_j->valuestring || uid_j->valuestring[0] == '\0') {
+            ws_send_rsp(fd, id, false, "missing uid");
+            return;
+        }
+        if (!cJSON_IsNumber(mireds_j) || mireds_j->valuedouble < 1 || mireds_j->valuedouble > 1000) {
+            ws_send_rsp(fd, id, false, "bad mireds");
+            return;
+        }
+
+        uint8_t endpoint = 1;
+        if (cJSON_IsNumber(endpoint_j) && endpoint_j->valuedouble >= 1 && endpoint_j->valuedouble <= 240) {
+            endpoint = (uint8_t)endpoint_j->valuedouble;
+        }
+        uint16_t transition_ms = 0;
+        if (cJSON_IsNumber(transition_ms_j) && transition_ms_j->valuedouble >= 0 && transition_ms_j->valuedouble <= 60000) {
+            transition_ms = (uint16_t)transition_ms_j->valuedouble;
+        }
+
+        gw_device_uid_t uid = {0};
+        strlcpy(uid.uid, uid_j->valuestring, sizeof(uid.uid));
+        gw_zigbee_color_temp_t temp = {.mireds = (uint16_t)mireds_j->valuedouble, .transition_ms = transition_ms};
+        esp_err_t err = gw_zigbee_color_move_to_temp(&uid, endpoint, temp);
+        if (err != ESP_OK) {
+            ws_send_rsp(fd, id, false, "color temp failed");
+            return;
+        }
         ws_send_rsp(fd, id, true, NULL);
         return;
     }

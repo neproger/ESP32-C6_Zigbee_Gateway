@@ -36,6 +36,7 @@
 #include "gw_core/device_registry.h"
 #include "gw_core/automation_store.h"
 #include "gw_core/sensor_store.h"
+#include "gw_core/state_store.h"
 #include "gw_core/zb_model.h"
 #include "gw_http/gw_http.h"
 
@@ -84,20 +85,36 @@ static esp_err_t zb_core_action_handler(esp_zb_core_action_callback_id_t callbac
                 v.value_type = GW_SENSOR_VALUE_I32;
                 v.value_i32 = *((const int16_t *)m->attribute.data.value);
                 (void)gw_sensor_store_upsert(&v);
+
+                // Normalized state key for automations.
+                (void)gw_state_store_set_f32(&uid, "temperature_c", ((float)v.value_i32) / 100.0f, v.ts_ms);
             } else if (cluster_id == ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT && attr_id == ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID &&
                        m->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_U16 && m->attribute.data.size >= 2) {
                 v.value_type = GW_SENSOR_VALUE_U32;
                 v.value_u32 = *((const uint16_t *)m->attribute.data.value);
                 (void)gw_sensor_store_upsert(&v);
+
+                (void)gw_state_store_set_f32(&uid, "humidity_pct", ((float)v.value_u32) / 100.0f, v.ts_ms);
             } else if (cluster_id == ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG && attr_id == ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID &&
                        m->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_U8 && m->attribute.data.size >= 1) {
                 v.value_type = GW_SENSOR_VALUE_U32;
                 v.value_u32 = *((const uint8_t *)m->attribute.data.value);
                 (void)gw_sensor_store_upsert(&v);
+
+                // Battery percentage is 0.5% units. Normalize to integer percent.
+                (void)gw_state_store_set_u32(&uid, "battery_pct", (uint32_t)(v.value_u32 / 2u), v.ts_ms);
+            } else if (cluster_id == ESP_ZB_ZCL_CLUSTER_ID_ON_OFF && attr_id == ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID &&
+                       (m->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_BOOL || m->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_U8) &&
+                       m->attribute.data.size >= 1) {
+                uint8_t onoff = *((const uint8_t *)m->attribute.data.value);
+                (void)gw_state_store_set_bool(&uid, "onoff", onoff != 0, v.ts_ms);
             }
+
+            // Keep last seen fresh on any attribute report.
+            (void)gw_state_store_set_u64(&uid, "last_seen_ms", v.ts_ms, v.ts_ms);
         }
 
-        // Log into event bus (and UART mirror) for quick visibility.
+        // Normalized event: zigbee.attr_report (msg + structured payload)
         {
             char msg[96];
             (void)snprintf(msg,
@@ -108,11 +125,7 @@ static esp_err_t zb_core_action_handler(esp_zb_core_action_callback_id_t callbac
                            (unsigned)m->src_endpoint,
                            (unsigned)m->attribute.data.type,
                            (unsigned)m->attribute.data.size);
-            gw_event_bus_publish("zigbee_attr_report", "zigbee", uid.uid, src_short, msg);
-        }
 
-        // Normalized event (for automations): zigbee.attr_report
-        {
             char payload[160];
             if (cluster_id == ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT && attr_id == ESP_ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID &&
                 m->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_S16 && m->attribute.data.size >= 2 && m->attribute.data.value != NULL) {
@@ -155,7 +168,7 @@ static esp_err_t zb_core_action_handler(esp_zb_core_action_callback_id_t callbac
                                (unsigned)m->attribute.data.type,
                                (unsigned)m->attribute.data.size);
             }
-            gw_event_bus_publish_json("zigbee.attr_report", "zigbee", uid.uid, src_short, payload);
+            gw_event_bus_publish_ex("zigbee.attr_report", "zigbee", uid.uid, src_short, msg, payload);
         }
 
         return ESP_OK;
@@ -259,7 +272,6 @@ static esp_err_t zb_core_action_handler(esp_zb_core_action_callback_id_t callbac
                            (unsigned)src_short,
                            (unsigned)m->info.src_endpoint,
                            (int)m->info.header.rssi);
-            gw_event_bus_publish("zigbee_onoff_toggle", "zigbee", uid.uid, src_short, msg);
 
             {
                 char payload[160];
@@ -269,7 +281,7 @@ static esp_err_t zb_core_action_handler(esp_zb_core_action_callback_id_t callbac
                                (unsigned)m->info.src_endpoint,
                                (unsigned)ESP_ZB_ZCL_CLUSTER_ID_ON_OFF,
                                (int)m->info.header.rssi);
-                gw_event_bus_publish_json("zigbee.command", "zigbee", uid.uid, src_short, payload);
+                gw_event_bus_publish_ex("zigbee.command", "zigbee", uid.uid, src_short, msg, payload);
             }
         }
     }
@@ -433,6 +445,7 @@ void app_main(void)
     ESP_ERROR_CHECK(gw_event_bus_init());
     ESP_ERROR_CHECK(gw_zb_model_init());
     ESP_ERROR_CHECK(gw_sensor_store_init());
+    ESP_ERROR_CHECK(gw_state_store_init());
     gw_event_bus_publish("boot", "system", "", 0, "app_main started");
 
 #if CONFIG_ESP_COEX_SW_COEXIST_ENABLE

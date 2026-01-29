@@ -44,6 +44,13 @@ static void safe_copy_str(char *dst, size_t dst_size, const char *src)
     strlcpy(dst, src, dst_size);
 }
 
+void gw_event_bus_publish_ex(const char *type,
+                            const char *source,
+                            const char *device_uid,
+                            uint16_t short_addr,
+                            const char *msg,
+                            const char *payload_json);
+
 esp_err_t gw_event_bus_init(void)
 {
     if (s_inited) {
@@ -87,17 +94,36 @@ uint32_t gw_event_bus_last_id(void)
 
 void gw_event_bus_publish(const char *type, const char *source, const char *device_uid, uint16_t short_addr, const char *msg)
 {
+    gw_event_bus_publish_ex(type, source, device_uid, short_addr, msg, NULL);
+}
+
+void gw_event_bus_publish_json(const char *type, const char *source, const char *device_uid, uint16_t short_addr, const char *payload_json)
+{
+    // Legacy helper: publish a structured payload without forcing callers to build a human msg.
+    // msg is left empty to avoid re-introducing the old "JSON-in-msg" pattern.
+    gw_event_bus_publish_ex(type, source, device_uid, short_addr, "", payload_json);
+}
+
+void gw_event_bus_publish_ex(const char *type,
+                            const char *source,
+                            const char *device_uid,
+                            uint16_t short_addr,
+                            const char *msg,
+                            const char *payload_json)
+{
     if (!s_inited) {
         return;
     }
 
     gw_event_t e = {0};
+    e.v = 1;
     e.ts_ms = (uint64_t)(esp_timer_get_time() / 1000);
     safe_copy_str(e.type, sizeof(e.type), type);
     safe_copy_str(e.source, sizeof(e.source), source);
     safe_copy_str(e.device_uid, sizeof(e.device_uid), device_uid);
     e.short_addr = short_addr;
     safe_copy_str(e.msg, sizeof(e.msg), msg);
+    safe_copy_str(e.payload_json, sizeof(e.payload_json), payload_json);
 
     portENTER_CRITICAL(&s_ring_lock);
     e.id = s_next_id++;
@@ -131,12 +157,6 @@ void gw_event_bus_publish(const char *type, const char *source, const char *devi
              e.device_uid[0] ? e.device_uid : "-",
              (unsigned)e.short_addr,
              e.msg[0] ? e.msg : "-");
-}
-
-void gw_event_bus_publish_json(const char *type, const char *source, const char *device_uid, uint16_t short_addr, const char *payload_json)
-{
-    // For now, JSON payloads are stored in gw_event_t.msg (string) and are JSON-escaped at the transport layer (WS/HTTP).
-    gw_event_bus_publish(type, source, device_uid, short_addr, payload_json);
 }
 
 size_t gw_event_bus_list_since(uint32_t since_id, gw_event_t *out, size_t max_out, uint32_t *out_last_id)

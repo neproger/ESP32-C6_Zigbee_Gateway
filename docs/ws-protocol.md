@@ -45,6 +45,10 @@ Supported methods:
 - `network.permit_join` (`seconds` 1..255)
 - `devices.remove` (`uid` string, optional `kick` boolean)
 - `devices.set_name` (`uid` string, `name` string)
+- `devices.onoff` (`uid` string, `endpoint` number, `cmd` one of `"on"|"off"|"toggle"`)
+- `devices.level` (`uid` string, `endpoint` number, `level` 0..254, optional `transition_ms` 0..60000)
+- `devices.color_xy` (`uid` string, `endpoint` number, `x` 0..65535, `y` 0..65535, optional `transition_ms` 0..60000)
+- `devices.color_temp` (`uid` string, `endpoint` number, `mireds` 1..1000, optional `transition_ms` 0..60000)
 
 ### `ping`
 
@@ -67,6 +71,7 @@ Streamed when subscribed to `events`:
 ```json
 {
   "t": "event",
+  "v": 1,
   "id": 457,
   "ts_ms": 123456,
   "type": "zigbee_join",
@@ -79,7 +84,7 @@ Streamed when subscribed to `events`:
 ```
 
 Notes:
-- `payload` is optional. For normalized events the gateway sends it as a JSON object (parsed from `msg` when `msg` contains JSON).
+- `payload` is optional. For normalized events the gateway sends it as a JSON object (from stored structured payload).
 
 ### `rsp`
 

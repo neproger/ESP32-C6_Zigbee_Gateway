@@ -6,6 +6,7 @@ idf_component_register(
         "src/zb_model.c"
         "src/zb_classify.c"
         "src/sensor_store.c"
+        "src/state_store.c"
         "src/rules_engine.c"
     INCLUDE_DIRS
         "include"

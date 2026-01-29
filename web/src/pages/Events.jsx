@@ -21,6 +21,8 @@ export default function Events() {
 	const [events, setEvents] = useState([])
 	const [lastId, setLastId] = useState(0)
 	const [paused, setPaused] = useState(false)
+	const [showMsg, setShowMsg] = useState(false)
+	const [deviceNameByUid, setDeviceNameByUid] = useState(() => new Map())
 	const [status, setStatus] = useState('')
 	const [conn, setConn] = useState('disconnected')
 	const [flashIds, setFlashIds] = useState(() => new Set())
@@ -43,6 +45,41 @@ export default function Events() {
 	useEffect(() => {
 		load()
 	}, [])
+
+	const loadDeviceNames = useCallback(async () => {
+		try {
+			const r = await fetch('/api/devices')
+			if (!r.ok) throw new Error(`GET /api/devices failed: ${r.status}`)
+			const data = await r.json()
+			const items = Array.isArray(data) ? data : []
+			setDeviceNameByUid(() => {
+				const next = new Map()
+				for (const d of items) {
+					const uid = String(d?.device_uid ?? '')
+					const name = String(d?.name ?? '')
+					if (uid) next.set(uid, name)
+				}
+				return next
+			})
+		} catch {
+			// ignore
+		}
+	}, [])
+
+	useEffect(() => {
+		loadDeviceNames()
+	}, [loadDeviceNames])
+
+	useEffect(() => {
+		if (!Array.isArray(events) || events.length === 0) return
+		for (const e of events) {
+			const uid = String(e?.device_uid ?? '')
+			if (uid && !deviceNameByUid.has(uid)) {
+				loadDeviceNames()
+				break
+			}
+		}
+	}, [events, deviceNameByUid, loadDeviceNames])
 
 	useEffect(() => {
 		const cleanup = () => {
@@ -192,6 +229,15 @@ export default function Events() {
 		setFlashIds(new Set())
 	}, [])
 
+	const payloadToText = useCallback((payload) => {
+		if (payload == null) return ''
+		try {
+			return JSON.stringify(payload, null, 2)
+		} catch {
+			return String(payload)
+		}
+	}, [])
+
 	const load = useCallback(async () => {
 		try {
 			const since = lastIdRef.current ?? 0
@@ -230,6 +276,10 @@ export default function Events() {
 				<div className="row">
 					<button onClick={() => setPaused((p) => !p)}>{paused ? 'Resume' : 'Pause'}</button>
 					<button onClick={clear}>Clear</button>
+					<label className="muted" style={{ display: 'inline-flex', gap: 8, alignItems: 'center' }}>
+						<input type="checkbox" checked={showMsg} onChange={(e) => setShowMsg(Boolean(e?.target?.checked))} />
+						Show msg
+					</label>
 					<button onClick={load} disabled={paused}>
 						Refresh
 					</button>
@@ -244,15 +294,15 @@ export default function Events() {
 				<table >
 					<thead>
 						<tr>
-							<th>ID</th>
-							<th>Time</th>
-							<th>Type</th>
-							<th>Source</th>
-							<th>UID</th>
-							<th>Short</th>
-							<th>Message</th>
-						</tr>
-					</thead>
+									<th>ID</th>
+									<th>Time</th>
+									<th>Type</th>
+									<th>Source</th>
+									<th>Device</th>
+									<th>Short</th>
+									<th>Payload</th>
+								</tr>
+							</thead>
 					<tbody>
 						{sortedEvents.length === 0 ? (
 							<tr>
@@ -270,15 +320,30 @@ export default function Events() {
 										<code>{String(e?.id ?? '')}</code>
 									</td>
 									<td className="muted">{msToUptime(e?.ts_ms)}</td>
-									<td>{String(e?.type ?? '')}</td>
+									<td>
+										{String(e?.type ?? '')}
+										{e?.v != null ? <span className="muted"> v{String(e?.v)}</span> : null}
+									</td>
 									<td className="muted">{String(e?.source ?? '')}</td>
 									<td>
-										<code>{String(e?.device_uid ?? '')}</code>
+										{(() => {
+											const uid = String(e?.device_uid ?? '')
+											const name = uid ? deviceNameByUid.get(uid) : ''
+											const label = (name && name !== 'undefined' && name !== 'null') ? name : uid
+											return label ? <span title={uid}>{label}</span> : <span className="muted">-</span>
+										})()}
 									</td>
 									<td>
 										<code>{shortToHex(e?.short_addr)}</code>
 									</td>
-									<td className="mono">{String(e?.msg ?? '')}</td>
+									<td className="mono" style={{ whiteSpace: 'pre-wrap' }}>
+										{e?.payload != null ? payloadToText(e?.payload) : <span className="muted">no payload</span>}
+										{showMsg && e?.msg ? (
+											<div className="muted mono" style={{ marginTop: 8, whiteSpace: 'pre-wrap' }}>
+												msg: {String(e?.msg ?? '')}
+											</div>
+										) : null}
+									</td>
 								</tr>
 							))
 						)}
