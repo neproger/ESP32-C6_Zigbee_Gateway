@@ -14,6 +14,7 @@
 #include "gw_core/sensor_store.h"
 #include "gw_core/zb_model.h"
 #include "gw_zigbee/gw_zigbee.h"
+#include "gw_http/gw_ws.h"
 
 static const char *TAG = "gw_http";
 
@@ -536,9 +537,8 @@ static esp_err_t api_devices_post_handler(httpd_req_t *req)
         query[0] = '\0';
     }
 
-    gw_device_t d = {0};
     char uid[GW_DEVICE_UID_STRLEN] = {0};
-    char name[sizeof(d.name)] = {0};
+    char name[sizeof(((gw_device_t *)0)->name)] = {0};
     char onoff[8] = {0};
     char button[8] = {0};
 
@@ -546,15 +546,28 @@ static esp_err_t api_devices_post_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing uid");
         return ESP_OK;
     }
-    find_query_value(query, "name", name, sizeof(name));
-    find_query_value(query, "onoff", onoff, sizeof(onoff));
-    find_query_value(query, "button", button, sizeof(button));
+    const bool has_name = (find_query_value(query, "name", name, sizeof(name)) != NULL);
+    const bool has_onoff = (find_query_value(query, "onoff", onoff, sizeof(onoff)) != NULL);
+    const bool has_button = (find_query_value(query, "button", button, sizeof(button)) != NULL);
 
+    gw_device_t d = {0};
     strlcpy(d.device_uid.uid, uid, sizeof(d.device_uid.uid));
-    strlcpy(d.name, name[0] ? name : "Device", sizeof(d.name));
-    d.short_addr = 0;
-    d.has_onoff = (onoff[0] == '1');
-    d.has_button = (button[0] == '1');
+    if (gw_device_registry_get(&d.device_uid, &d) != ESP_OK) {
+        // New record: keep defaults (short_addr=0, caps=false, name empty) unless provided below.
+        memset(&d, 0, sizeof(d));
+        strlcpy(d.device_uid.uid, uid, sizeof(d.device_uid.uid));
+    }
+
+    if (has_name) {
+        // Allow empty string to clear name.
+        strlcpy(d.name, name, sizeof(d.name));
+    }
+    if (has_onoff) {
+        d.has_onoff = (onoff[0] == '1');
+    }
+    if (has_button) {
+        d.has_button = (button[0] == '1');
+    }
 
     esp_err_t err = gw_device_registry_upsert(&d);
     if (err != ESP_OK) {
@@ -886,6 +899,7 @@ esp_err_t gw_http_start(void)
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &api_devices_remove_post_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &api_network_permit_join_post_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &api_events_get_uri));
+    ESP_ERROR_CHECK(gw_ws_register(s_server));
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &static_uri));
 
     if (s_server_port != 0) {
@@ -902,6 +916,7 @@ esp_err_t gw_http_stop(void)
         return ESP_OK;
     }
 
+    gw_ws_unregister();
     esp_err_t err = httpd_stop(s_server);
     s_server = NULL;
     s_server_port = 0;

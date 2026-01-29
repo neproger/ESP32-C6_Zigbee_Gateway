@@ -583,13 +583,18 @@ void gw_zigbee_on_device_annce(const uint8_t ieee_addr[8], uint16_t short_addr, 
 
     gw_device_t d = {0};
     ieee_to_uid_str(ieee_addr, d.device_uid.uid);
+
+    // Preserve user-provided name and discovered capabilities across rejoin/announce.
+    // Only refresh network-layer state here.
+    {
+        gw_device_t existing = {0};
+        if (gw_device_registry_get(&d.device_uid, &existing) == ESP_OK) {
+            d = existing;
+        }
+    }
+
     d.short_addr = short_addr;
     d.last_seen_ms = (uint64_t)(esp_timer_get_time() / 1000);
-    // Capabilities are application-level; keep defaults for now.
-    // Name can be set later via API/UI once we have persistence.
-    d.name[0] = '\0';
-    d.has_onoff = false;
-    d.has_button = false;
 
     esp_err_t err = gw_device_registry_upsert(&d);
     if (err != ESP_OK) {

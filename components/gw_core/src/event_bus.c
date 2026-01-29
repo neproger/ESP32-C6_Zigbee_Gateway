@@ -23,6 +23,15 @@ static size_t s_ring_count;  // <= GW_EVENT_RING_CAP
 static uint32_t s_next_id = 1;
 static portMUX_TYPE s_ring_lock = portMUX_INITIALIZER_UNLOCKED;
 
+// Optional listeners called on publish.
+#define GW_EVENT_LISTENER_CAP 4
+typedef struct {
+    gw_event_bus_listener_t cb;
+    void *user_ctx;
+} gw_event_listener_slot_t;
+static gw_event_listener_slot_t s_listeners[GW_EVENT_LISTENER_CAP];
+static portMUX_TYPE s_listener_lock = portMUX_INITIALIZER_UNLOCKED;
+
 static void safe_copy_str(char *dst, size_t dst_size, const char *src)
 {
     if (dst == NULL || dst_size == 0) {
@@ -47,6 +56,11 @@ esp_err_t gw_event_bus_init(void)
     s_ring_count = 0;
     s_next_id = 1;
     portEXIT_CRITICAL(&s_ring_lock);
+
+    portENTER_CRITICAL(&s_listener_lock);
+    memset(s_listeners, 0, sizeof(s_listeners));
+    portEXIT_CRITICAL(&s_listener_lock);
+
     s_inited = true;
     return ESP_OK;
 }
@@ -94,6 +108,20 @@ void gw_event_bus_publish(const char *type, const char *source, const char *devi
     }
     portEXIT_CRITICAL(&s_ring_lock);
 
+    // Notify listeners outside of the ring critical section.
+    gw_event_listener_slot_t listeners[GW_EVENT_LISTENER_CAP];
+    size_t listener_count = 0;
+    portENTER_CRITICAL(&s_listener_lock);
+    for (size_t i = 0; i < GW_EVENT_LISTENER_CAP; i++) {
+        if (s_listeners[i].cb) {
+            listeners[listener_count++] = s_listeners[i];
+        }
+    }
+    portEXIT_CRITICAL(&s_listener_lock);
+    for (size_t i = 0; i < listener_count; i++) {
+        listeners[i].cb(&e, listeners[i].user_ctx);
+    }
+
     // Duplicate event log to UART/monitor for convenience.
     ESP_LOGI(TAG,
              "#%u %s/%s uid=%s short=0x%04x %s",
@@ -137,5 +165,55 @@ size_t gw_event_bus_list_since(uint32_t since_id, gw_event_t *out, size_t max_ou
         *out_last_id = last;
     }
     return written;
+}
+
+esp_err_t gw_event_bus_add_listener(gw_event_bus_listener_t cb, void *user_ctx)
+{
+    if (!s_inited) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!cb) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    portENTER_CRITICAL(&s_listener_lock);
+    for (size_t i = 0; i < GW_EVENT_LISTENER_CAP; i++) {
+        if (s_listeners[i].cb == cb && s_listeners[i].user_ctx == user_ctx) {
+            portEXIT_CRITICAL(&s_listener_lock);
+            return ESP_OK;
+        }
+    }
+    for (size_t i = 0; i < GW_EVENT_LISTENER_CAP; i++) {
+        if (s_listeners[i].cb == NULL) {
+            s_listeners[i].cb = cb;
+            s_listeners[i].user_ctx = user_ctx;
+            portEXIT_CRITICAL(&s_listener_lock);
+            return ESP_OK;
+        }
+    }
+    portEXIT_CRITICAL(&s_listener_lock);
+    return ESP_ERR_NO_MEM;
+}
+
+esp_err_t gw_event_bus_remove_listener(gw_event_bus_listener_t cb, void *user_ctx)
+{
+    if (!s_inited) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!cb) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    portENTER_CRITICAL(&s_listener_lock);
+    for (size_t i = 0; i < GW_EVENT_LISTENER_CAP; i++) {
+        if (s_listeners[i].cb == cb && s_listeners[i].user_ctx == user_ctx) {
+            s_listeners[i].cb = NULL;
+            s_listeners[i].user_ctx = NULL;
+            portEXIT_CRITICAL(&s_listener_lock);
+            return ESP_OK;
+        }
+    }
+    portEXIT_CRITICAL(&s_listener_lock);
+    return ESP_ERR_NOT_FOUND;
 }
 

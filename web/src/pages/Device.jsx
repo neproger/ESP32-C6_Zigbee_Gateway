@@ -8,6 +8,7 @@ function renderSensorValue(s) {
 
 export default function Device() {
   const { uid } = useParams()
+  const [device, setDevice] = useState(null)
   const [endpoints, setEndpoints] = useState([])
   const [sensors, setSensors] = useState([])
   const [status, setStatus] = useState('')
@@ -17,9 +18,17 @@ export default function Device() {
     if (!u) return
     setStatus('')
     try {
-      const [epr, sr] = await Promise.all([fetch(`/api/endpoints?uid=${encodeURIComponent(u)}`), fetch(`/api/sensors?uid=${encodeURIComponent(u)}`)])
+      const [dr, epr, sr] = await Promise.all([
+        fetch(`/api/devices`),
+        fetch(`/api/endpoints?uid=${encodeURIComponent(u)}`),
+        fetch(`/api/sensors?uid=${encodeURIComponent(u)}`),
+      ])
+      if (!dr.ok) throw new Error(`GET /api/devices failed: ${dr.status}`)
       if (!epr.ok) throw new Error(`GET /api/endpoints failed: ${epr.status}`)
       if (!sr.ok) throw new Error(`GET /api/sensors failed: ${sr.status}`)
+      const devs = await dr.json()
+      const d = Array.isArray(devs) ? devs.find((x) => String(x?.device_uid ?? '') === u) : null
+      setDevice(d ?? null)
       const epData = await epr.json()
       const sData = await sr.json()
       setEndpoints(Array.isArray(epData) ? epData : [])
@@ -55,6 +64,11 @@ export default function Device() {
         <div>
           <h1>Device</h1>
           <div className="muted">
+            {device?.name ? (
+              <>
+                <span>{String(device.name)}</span> <span className="muted">·</span>{' '}
+              </>
+            ) : null}
             <code>{String(uid ?? '')}</code>
           </div>
         </div>

@@ -96,6 +96,22 @@ td {
   font-size: 14px;
 }
 
+tr.event-flash td {
+  animation: eventFlash 4.5s ease-out 1 forwards;
+}
+
+@keyframes eventFlash {
+  0% {
+    background-color: rgba(255, 255, 255, 0.10);
+  }
+  66.666% {
+    background-color: rgba(255, 255, 255, 0.10);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
 code {
   background: rgba(255, 255, 255, 0.06);
   padding: 2px 6px;

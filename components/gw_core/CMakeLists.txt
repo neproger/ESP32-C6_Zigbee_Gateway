@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "src/event_bus.c"
         "src/device_registry.c"
+        "src/automation_store.c"
         "src/zb_model.c"
         "src/sensor_store.c"
         "src/rules_engine.c"
@@ -11,5 +12,6 @@ idf_component_register(
         esp_event
         esp_timer
         log
+        nvs_flash
 )
 

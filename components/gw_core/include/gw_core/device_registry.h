@@ -20,6 +20,7 @@ typedef struct {
 esp_err_t gw_device_registry_init(void);
 esp_err_t gw_device_registry_upsert(const gw_device_t *device);
 esp_err_t gw_device_registry_get(const gw_device_uid_t *uid, gw_device_t *out_device);
+esp_err_t gw_device_registry_set_name(const gw_device_uid_t *uid, const char *name);
 esp_err_t gw_device_registry_remove(const gw_device_uid_t *uid);
 size_t gw_device_registry_list(gw_device_t *out_devices, size_t max_devices);
 

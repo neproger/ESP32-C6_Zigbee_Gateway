@@ -34,6 +34,7 @@
 #include "gw_zigbee/gw_zigbee.h"
 #include "gw_core/event_bus.h"
 #include "gw_core/device_registry.h"
+#include "gw_core/automation_store.h"
 #include "gw_core/sensor_store.h"
 #include "gw_core/zb_model.h"
 #include "gw_http/gw_http.h"
@@ -388,6 +389,7 @@ void app_main(void)
     }
 
     ESP_ERROR_CHECK(gw_device_registry_init());
+    ESP_ERROR_CHECK(gw_automation_store_init());
     ESP_ERROR_CHECK(gw_http_start());
 #if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
     ESP_ERROR_CHECK(esp_zb_gateway_console_init());

@@ -35,6 +35,8 @@ typedef struct {
     char msg[128];
 } gw_event_t;
 
+typedef void (*gw_event_bus_listener_t)(const gw_event_t *event, void *user_ctx);
+
 esp_err_t gw_event_bus_init(void);
 esp_err_t gw_event_bus_post(gw_event_id_t id, const void *data, size_t data_size, TickType_t ticks_to_wait);
 
@@ -42,6 +44,10 @@ esp_err_t gw_event_bus_post(gw_event_id_t id, const void *data, size_t data_size
 uint32_t gw_event_bus_last_id(void);
 void gw_event_bus_publish(const char *type, const char *source, const char *device_uid, uint16_t short_addr, const char *msg);
 size_t gw_event_bus_list_since(uint32_t since_id, gw_event_t *out, size_t max_out, uint32_t *out_last_id);
+
+// Optional listeners called for each gw_event_bus_publish(). Keep callbacks fast and non-blocking.
+esp_err_t gw_event_bus_add_listener(gw_event_bus_listener_t cb, void *user_ctx);
+esp_err_t gw_event_bus_remove_listener(gw_event_bus_listener_t cb, void *user_ctx);
 
 #ifdef __cplusplus
 }

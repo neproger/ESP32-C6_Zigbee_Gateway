@@ -74,6 +74,27 @@ export default function Devices() {
     [loadDevices],
   )
 
+  const renameDevice = useCallback(
+    async (uid, currentName) => {
+      const u = String(uid ?? '')
+      if (!u) return
+      const next = prompt(`Device name for ${u}:`, String(currentName ?? ''))
+      if (next === null) return
+
+      setStatus('Renaming...')
+      try {
+        const r = await fetch(`/api/devices?uid=${encodeURIComponent(u)}&name=${encodeURIComponent(next)}`, { method: 'POST' })
+        if (!r.ok) throw new Error(`POST /api/devices failed: ${r.status}`)
+        await r.json().catch(() => null)
+        await loadDevices()
+        setStatus('Renamed')
+      } catch (e) {
+        setStatus(String(e?.message ?? e))
+      }
+    },
+    [loadDevices],
+  )
+
   useEffect(() => {
     loadDevices()
   }, [loadDevices])
@@ -128,6 +149,7 @@ export default function Devices() {
                   <td>{capsToText(d)}</td>
                   <td>
                     <div className="row">
+                      <button onClick={() => renameDevice(d?.device_uid, d?.name)}>Rename</button>
                       <button onClick={() => removeDevice(d?.device_uid, false)}>Forget</button>
                       <button onClick={() => removeDevice(d?.device_uid, true)}>Forget + kick</button>
                     </div>
