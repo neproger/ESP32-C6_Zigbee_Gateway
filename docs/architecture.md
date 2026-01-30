@@ -13,8 +13,38 @@
 
 Состояние репозитория на данный момент:
 
-- Реализовано: базовый `gw_core` (реестр устройств), `gw_http` (минимальный UI + `GET/POST /api/devices`), Wi‑Fi STA с попыткой подключения к известным точкам (см. `main/wifi_aps_config.h`), печать IP и ссылки на UI.
-- Не реализовано (в архитектуре описано как “целевое”): `gw_zigbee` как отдельный менеджер/очередь команд, `gw_storage`, `gw_mqtt`, SSE `/api/events`, правила и полноценный API.
+- Реализовано:
+  - `gw_core`: реестр устройств + persist в NVS, event bus с поддержкой structured payload (JSON) для нормализованных событий.
+  - `gw_zigbee`: менеджер Zigbee (discovery endpoints/clusters, bind/leave/permit_join) + примитивы действий:
+    - unicast (device): on/off/toggle, level, color_xy, color_temp
+    - groupcast (group): on/off/toggle, level, color_xy, color_temp
+    - scenes: store/recall (на группу)
+    - binding: bind/unbind (ZDO)
+  - `gw_http`: REST API + WebSocket `/ws` (JSON-RPC style).
+  - Web UI (`web/`) упаковывается в SPIFFS partition `www` и может обновляться отдельно от прошивки.
+  - Wi‑Fi STA с попыткой подключения к известным точкам (см. `main/wifi_aps_config.h`), печать IP и ссылки на UI.
+- Не реализовано / в работе:
+  - Исполнение правил (rules engine) и таймеры/cron (пока есть только хранение автоматизаций в NVS и управление через WS).
+  - MQTT client (опционально по архитектуре).
+  - Расширенное хранилище/миграции схем (кроме текущих NVS blobs).
+  - SSE `/api/events` (вместо этого используем WS поток событий).
+
+### Инварианты слоёв (важно соблюдать)
+- **Только `gw_zigbee` имеет право вызывать `esp_zb_*` / Zigbee SDK.** Остальные слои общаются через публичный API `gw_zigbee/*`.
+- `gw_http` — транспорт/адаптер (REST/WS): парсит вход, валидирует, вызывает `gw_core`/`gw_zigbee`, формирует ответ.
+- `gw_core` — бизнес-логика/модели/хранилища: не зависит от HTTP и не вызывает Zigbee SDK напрямую.
+- Любые “события для UI/отладки/автоматизаций” публикуются через `gw_event_bus` (с `payload_json` для нормализованных событий).
+
+### Карта WS методов → слой/функция
+Актуальный список методов — в `docs/ws-protocol.md`. Маппинг (ориентир):
+- `network.permit_join` → `gw_zigbee_permit_join()`
+- `devices.*` (onoff/level/color_*) → `gw_zigbee_*` (unicast)
+- `groups.*` (onoff/level/color_*) → `gw_zigbee_group_*` (groupcast)
+- `scenes.store|scenes.recall` → `gw_zigbee_scene_store()` / `gw_zigbee_scene_recall()`
+- `bindings.bind|bindings.unbind` → `gw_zigbee_bind()` / `gw_zigbee_unbind()`
+- `devices.set_name` → `gw_device_registry_*`
+- `automations.*` → `gw_automation_store_*`
+- `events.list` → `gw_event_bus_*`
 
 Связанные документы:
 - Быстрый старт: `docs/getting-started.md`

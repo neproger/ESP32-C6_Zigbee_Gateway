@@ -37,6 +37,7 @@
 #include "gw_core/automation_store.h"
 #include "gw_core/sensor_store.h"
 #include "gw_core/state_store.h"
+#include "gw_core/rules_engine.h"
 #include "gw_core/zb_model.h"
 #include "gw_http/gw_http.h"
 
@@ -446,6 +447,7 @@ void app_main(void)
     ESP_ERROR_CHECK(gw_zb_model_init());
     ESP_ERROR_CHECK(gw_sensor_store_init());
     ESP_ERROR_CHECK(gw_state_store_init());
+    ESP_ERROR_CHECK(gw_rules_init());
     gw_event_bus_publish("boot", "system", "", 0, "app_main started");
 
 #if CONFIG_ESP_COEX_SW_COEXIST_ENABLE

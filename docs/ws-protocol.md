@@ -57,6 +57,7 @@ Supported methods:
 - `scenes.recall` (`group_id` number or `"0x...."`, `scene_id` 1..255)
 - `bindings.bind` (`src_uid` string, `src_endpoint` 1..240, `cluster_id` number or `"0x...."`, `dst_uid` string, `dst_endpoint` 1..240)
 - `bindings.unbind` (same params as `bindings.bind`)
+- `actions.exec` (`action` object OR `actions` array of objects; uses same format as docs/automation-design.md `actions[]`)
 
 ### `ping`
 

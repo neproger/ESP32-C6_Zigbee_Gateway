@@ -284,8 +284,8 @@ export default function Device() {
 								</td>
 							</tr>
 						) : (
-							sortedEndpoints.map((e) => (
-								<tr key={String(e?.endpoint ?? Math.random())}>
+							sortedEndpoints.map((e, index) => (
+								<tr key={index}>
 									<td>
 										<code>{String(e?.endpoint ?? '')}</code>
 									</td>

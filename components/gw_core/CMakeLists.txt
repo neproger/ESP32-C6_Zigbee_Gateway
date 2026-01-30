@@ -8,6 +8,7 @@ idf_component_register(
         "src/sensor_store.c"
         "src/state_store.c"
         "src/rules_engine.c"
+        "src/action_exec.c"
     INCLUDE_DIRS
         "include"
     PRIV_REQUIRES
@@ -15,5 +16,7 @@ idf_component_register(
         esp_timer
         log
         nvs_flash
+        gw_zigbee
+        json
 )
 

@@ -8,6 +8,7 @@
 #include "cJSON.h"
 #include "esp_log.h"
 
+#include "gw_core/action_exec.h"
 #include "gw_core/device_registry.h"
 #include "gw_core/automation_store.h"
 #include "gw_core/event_bus.h"
@@ -903,6 +904,45 @@ static void ws_handle_req(int fd, cJSON *root)
             return;
         }
         ws_send_rsp(fd, id, true, NULL);
+        return;
+    }
+
+    if (strcmp(m->valuestring, "actions.exec") == 0) {
+        cJSON *p = cJSON_GetObjectItemCaseSensitive(root, "p");
+        cJSON *action_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "action") : NULL;
+        cJSON *actions_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "actions") : NULL;
+
+        if (cJSON_IsObject(action_j)) {
+            char errbuf[96];
+            esp_err_t err = gw_action_exec(action_j, errbuf, sizeof(errbuf));
+            if (err != ESP_OK) {
+                ws_send_rsp(fd, id, false, (errbuf[0] != '\0') ? errbuf : "action failed");
+                return;
+            }
+            ws_send_rsp(fd, id, true, NULL);
+            return;
+        }
+
+        if (cJSON_IsArray(actions_j)) {
+            cJSON *it = NULL;
+            cJSON_ArrayForEach(it, actions_j)
+            {
+                if (!cJSON_IsObject(it)) {
+                    ws_send_rsp(fd, id, false, "actions must be objects");
+                    return;
+                }
+                char errbuf[96];
+                esp_err_t err = gw_action_exec(it, errbuf, sizeof(errbuf));
+                if (err != ESP_OK) {
+                    ws_send_rsp(fd, id, false, (errbuf[0] != '\0') ? errbuf : "action failed");
+                    return;
+                }
+            }
+            ws_send_rsp(fd, id, true, NULL);
+            return;
+        }
+
+        ws_send_rsp(fd, id, false, "missing action/actions");
         return;
     }
 
