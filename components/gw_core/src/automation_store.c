@@ -1,14 +1,19 @@
 #include "gw_core/automation_store.h"
 
+#include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "esp_check.h"
+#include "esp_log.h"
+#include "esp_spiffs.h"
 #include "freertos/FreeRTOS.h"
-#include "nvs.h"
-#include "nvs_flash.h"
+#include "freertos/portmacro.h"
+
+static const char *TAG = "gw_autos";
 
 static bool s_inited;
+static bool s_fs_inited;
 
 #define GW_AUTOMATION_CAP 16
 
@@ -20,12 +25,13 @@ typedef struct {
 } gw_automation_store_blob_t;
 
 static gw_automation_store_blob_t s_store;
-static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 
-static const char *NVS_NS = "gw";
-static const char *NVS_KEY = "autos";
 static const uint32_t MAGIC = 0x4155544f; // 'AUTO'
 static const uint16_t VERSION = 1;
+static const char *AUTOS_PATH = "/data/autos.bin";
+static const char *AUTOS_TMP_PATH = "/data/autos.tmp";
+
+static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 
 static size_t find_idx_locked(const char *id)
 {
@@ -38,23 +44,56 @@ static size_t find_idx_locked(const char *id)
     return (size_t)-1;
 }
 
-static esp_err_t save_to_nvs(void)
+static esp_err_t fs_init_once(void)
 {
-    nvs_handle_t h;
-    esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
-    if (err != ESP_OK) return err;
+    if (s_fs_inited) {
+        return ESP_OK;
+    }
 
-    err = nvs_set_blob(h, NVS_KEY, &s_store, sizeof(s_store));
-    // If space is tight/fragmented, try erasing the key and writing again.
-    if (err == ESP_ERR_NVS_NOT_ENOUGH_SPACE || err == ESP_ERR_NVS_NO_FREE_PAGES) {
-        (void)nvs_erase_key(h, NVS_KEY);
-        err = nvs_set_blob(h, NVS_KEY, &s_store, sizeof(s_store));
+    // Dedicated persistent partition for gateway data (separate from "www" so web updates don't wipe automations).
+    const esp_vfs_spiffs_conf_t conf = {
+        .base_path = "/data",
+        .partition_label = "gw_data",
+        .max_files = 4,
+        .format_if_mount_failed = true, // non-prod: prefer recovering automatically
+    };
+
+    esp_err_t err = esp_vfs_spiffs_register(&conf);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "spiffs mount failed (gw_data): %s (0x%x)", esp_err_to_name(err), (unsigned)err);
+        return err;
     }
-    if (err == ESP_OK) {
-        err = nvs_commit(h);
+
+    s_fs_inited = true;
+    return ESP_OK;
+}
+
+static esp_err_t save_to_fs(void)
+{
+    if (!s_fs_inited) {
+        return ESP_ERR_INVALID_STATE;
     }
-    nvs_close(h);
-    return err;
+
+    // Write-then-rename to avoid partial writes on power loss.
+    FILE *f = fopen(AUTOS_TMP_PATH, "wb");
+    if (!f) {
+        return ESP_FAIL;
+    }
+
+    size_t written = fwrite(&s_store, 1, sizeof(s_store), f);
+    (void)fclose(f);
+    if (written != sizeof(s_store)) {
+        (void)remove(AUTOS_TMP_PATH);
+        return ESP_FAIL;
+    }
+
+    (void)remove(AUTOS_PATH);
+    if (rename(AUTOS_TMP_PATH, AUTOS_PATH) != 0) {
+        // Best-effort fallback: keep tmp so user can inspect.
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
 }
 
 esp_err_t gw_automation_store_init(void)
@@ -69,37 +108,28 @@ esp_err_t gw_automation_store_init(void)
     s_store.version = VERSION;
     portEXIT_CRITICAL(&s_lock);
 
-    nvs_handle_t h;
-    esp_err_t err = nvs_open(NVS_NS, NVS_READONLY, &h);
-    if (err == ESP_OK) {
-        size_t sz = 0;
-        err = nvs_get_blob(h, NVS_KEY, NULL, &sz);
-        if (err == ESP_OK && sz == sizeof(s_store)) {
+    (void)fs_init_once();
+
+    if (s_fs_inited) {
+        FILE *f = fopen(AUTOS_PATH, "rb");
+        if (f) {
             gw_automation_store_blob_t *tmp = (gw_automation_store_blob_t *)malloc(sizeof(*tmp));
-            if (tmp == NULL) {
-                err = ESP_ERR_NO_MEM;
-            } else {
+            if (tmp) {
                 memset(tmp, 0, sizeof(*tmp));
-                err = nvs_get_blob(h, NVS_KEY, tmp, &sz);
-                if (err == ESP_OK && tmp->magic == MAGIC && tmp->version == VERSION && tmp->count <= GW_AUTOMATION_CAP) {
+                size_t read = fread(tmp, 1, sizeof(*tmp), f);
+                if (read == sizeof(*tmp) && tmp->magic == MAGIC && tmp->version == VERSION && tmp->count <= GW_AUTOMATION_CAP) {
                     portENTER_CRITICAL(&s_lock);
                     s_store = *tmp;
                     portEXIT_CRITICAL(&s_lock);
-                } else if (err == ESP_OK) {
-                    err = ESP_ERR_INVALID_STATE;
                 }
                 free(tmp);
             }
-        } else if (err == ESP_ERR_NVS_NOT_FOUND) {
-            err = ESP_OK;
+            (void)fclose(f);
         }
-        nvs_close(h);
-    } else if (err == ESP_ERR_NVS_NOT_FOUND) {
-        err = ESP_OK;
     }
 
     s_inited = true;
-    return (err == ESP_OK) ? ESP_OK : ESP_OK;
+    return ESP_OK;
 }
 
 size_t gw_automation_store_list(gw_automation_t *out, size_t max_out)
@@ -135,7 +165,6 @@ esp_err_t gw_automation_store_put(const gw_automation_t *a)
     normalized.name[sizeof(normalized.name) - 1] = '\0';
     normalized.json[sizeof(normalized.json) - 1] = '\0';
 
-    esp_err_t err = ESP_OK;
     portENTER_CRITICAL(&s_lock);
     size_t idx = find_idx_locked(normalized.id);
     if (idx != (size_t)-1) {
@@ -149,8 +178,12 @@ esp_err_t gw_automation_store_put(const gw_automation_t *a)
     }
     portEXIT_CRITICAL(&s_lock);
 
-    err = save_to_nvs();
-    return err;
+    if (!s_fs_inited) {
+        esp_err_t err = fs_init_once();
+        if (err != ESP_OK) return err;
+    }
+
+    return save_to_fs();
 }
 
 esp_err_t gw_automation_store_remove(const char *id)
@@ -170,7 +203,11 @@ esp_err_t gw_automation_store_remove(const char *id)
     memset(&s_store.items[s_store.count], 0, sizeof(s_store.items[s_store.count]));
     portEXIT_CRITICAL(&s_lock);
 
-    return save_to_nvs();
+    if (!s_fs_inited) {
+        esp_err_t err = fs_init_once();
+        if (err != ESP_OK) return err;
+    }
+    return save_to_fs();
 }
 
 esp_err_t gw_automation_store_set_enabled(const char *id, bool enabled)
@@ -186,5 +223,9 @@ esp_err_t gw_automation_store_set_enabled(const char *id, bool enabled)
     s_store.items[idx].enabled = enabled;
     portEXIT_CRITICAL(&s_lock);
 
-    return save_to_nvs();
+    if (!s_fs_inited) {
+        esp_err_t err = fs_init_once();
+        if (err != ESP_OK) return err;
+    }
+    return save_to_fs();
 }

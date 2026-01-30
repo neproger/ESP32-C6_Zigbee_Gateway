@@ -144,11 +144,13 @@ function AutomationEditor({
       { type: 'event', event_type: 'zigbee.command', match: { 'payload.cmd': 'toggle' } },
     ])
 
-  const addCondition = () =>
+  const addCondition = () => {
+    const fromTrigger = String(triggers?.[0]?.match?.device_uid ?? '')
     setField('conditions', [
       ...conditions,
-      { type: 'state', op: '>', ref: { device_uid: '', key: 'temperature_c' }, value: 10 },
+      { type: 'state', op: '>', ref: { device_uid: fromTrigger, key: 'temperature_c' }, value: 10 },
     ])
+  }
 
   const addAction = () =>
     setField('actions', [
@@ -293,7 +295,25 @@ function AutomationEditor({
                     <label className="muted">event_type</label>
                     <select
                       value={String(t?.event_type ?? 'zigbee.command')}
-                      onChange={(e) => updateTrigger(idx, { event_type: String(e.target.value ?? 'zigbee.command') })}
+                      onChange={(e) => {
+                        const nextType = String(e.target.value ?? 'zigbee.command')
+                        const match = { ...(t?.match ?? {}) }
+
+                        if (nextType === 'zigbee.attr_report') {
+                          // Attribute reports don't have payload.cmd.
+                          delete match['payload.cmd']
+                        } else if (nextType === 'zigbee.command') {
+                          // Commands don't have payload.attr; keep cluster optional.
+                          delete match['payload.attr']
+                        } else if (nextType === 'device.join' || nextType === 'device.leave') {
+                          // Device lifecycle events: drop any payload constraints.
+                          for (const k of Object.keys(match)) {
+                            if (k.startsWith('payload.')) delete match[k]
+                          }
+                        }
+
+                        updateTrigger(idx, { event_type: nextType, match })
+                      }}
                     >
                       <option value="zigbee.command">zigbee.command</option>
                       <option value="zigbee.attr_report">zigbee.attr_report</option>
@@ -365,6 +385,8 @@ function AutomationEditor({
                       onChange={(e) => {
                         const key = String(e.target.value ?? '')
                         const match = { ...(t?.match ?? {}) }
+                        // Attribute reports don't have payload.cmd; ensure it isn't accidentally set.
+                        delete match['payload.cmd']
                         if (!key) {
                           delete match['payload.cluster']
                           delete match['payload.attr']
@@ -507,14 +529,22 @@ function AutomationEditor({
                 <div style={{ height: 8 }} />
                 <div className="row">
                   <label className="muted">device_uid</label>
-                  <input
+                  <select
                     value={String(c?.ref?.device_uid ?? '')}
-                    onChange={(e) =>
-                      updateCondition(idx, { ref: { ...(c?.ref ?? {}), device_uid: String(e.target.value ?? '') } })
-                    }
-                    placeholder="0x00124B0012345678"
-                    style={{ minWidth: 260 }}
-                  />
+                    onChange={(e) => updateCondition(idx, { ref: { ...(c?.ref ?? {}), device_uid: String(e.target.value ?? '') } })}
+                    style={{ minWidth: 320 }}
+                  >
+                    <option value="">(select device)</option>
+                    {(Array.isArray(devices) ? devices : []).map((d) => {
+                      const uid = String(d?.device_uid ?? '')
+                      const name = String(d?.name ?? '')
+                      return (
+                        <option key={uid} value={uid}>
+                          {name ? `${name} (${uid})` : uid}
+                        </option>
+                      )
+                    })}
+                  </select>
                 </div>
                 <div style={{ height: 8 }} />
                 <div className="row">

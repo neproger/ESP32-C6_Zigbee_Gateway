@@ -39,6 +39,17 @@ static const int16_t s_report_change_temp_01c = 10;    // 0.10Â°C (temp is 0.01Â
 static const uint16_t s_report_change_hum_01pct = 100; // 1.00%RH (humidity is 0.01% units)
 static const uint8_t s_report_change_batt_halfpct = 2; // 1% (battery is 0.5% units)
 
+static inline void zb_lock(void)
+{
+    // Zigbee stack APIs are not generally thread-safe; guard calls made from non-Zigbee tasks.
+    esp_zb_lock_acquire(portMAX_DELAY);
+}
+
+static inline void zb_unlock(void)
+{
+    esp_zb_lock_release();
+}
+
 static void ieee_to_uid_str(const uint8_t ieee_addr[8], char out[GW_DEVICE_UID_STRLEN])
 {
     // Format: "0x00124B0012345678" + '\0' => 18 + 1 = 19
@@ -603,7 +614,9 @@ esp_err_t gw_zigbee_discover_by_short(uint16_t short_addr)
     gw_event_bus_publish("zigbee_ieee_lookup_requested", "zigbee", "", short_addr, "ieee_addr_req");
 
     // Schedule into Zigbee context.
+    zb_lock();
     esp_zb_scheduler_alarm(ieee_lookup_send_cb, token, 0);
+    zb_unlock();
     return ESP_OK;
 }
 
@@ -691,7 +704,9 @@ esp_err_t gw_zigbee_device_leave(const gw_device_uid_t *uid, uint16_t short_addr
     gw_event_bus_publish("zigbee_leave_requested", "zigbee", uid->uid, short_addr, rejoin ? "rejoin=1" : "rejoin=0");
 
     // Schedule into Zigbee context.
+    zb_lock();
     esp_zb_scheduler_alarm(leave_send_cb, token, 0);
+    zb_unlock();
     return ESP_OK;
 }
 
@@ -923,7 +938,9 @@ esp_err_t gw_zigbee_permit_join(uint8_t seconds)
     }
 
     // Schedule into Zigbee context.
+    zb_lock();
     esp_zb_scheduler_alarm(permit_join_cb, seconds, 0);
+    zb_unlock();
     return ESP_OK;
 }
 
@@ -979,7 +996,9 @@ esp_err_t gw_zigbee_onoff_cmd(const gw_device_uid_t *uid, uint8_t endpoint, gw_z
         gw_event_bus_publish_ex("zigbee.cmd", "zigbee", uid->uid, d.short_addr, "", payload);
     }
 
+    zb_lock();
     esp_zb_scheduler_alarm(action_send_cb, token, 0);
+    zb_unlock();
     return ESP_OK;
 }
 
@@ -1152,7 +1171,9 @@ esp_err_t gw_zigbee_color_move_to_temp(const gw_device_uid_t *uid, uint8_t endpo
         gw_event_bus_publish_ex("zigbee.cmd", "zigbee", uid->uid, d.short_addr, "", payload);
     }
 
+    zb_lock();
     esp_zb_scheduler_alarm(action_send_cb, token, 0);
+    zb_unlock();
     return ESP_OK;
 }
 
@@ -1179,7 +1200,9 @@ static esp_err_t schedule_group_action(uint16_t group_id, gw_zb_action_ctx_t *ct
     s_action_ctx_by_token[token] = ctx;
     portEXIT_CRITICAL(&s_action_lock);
 
+    zb_lock();
     esp_zb_scheduler_alarm(action_send_cb, token, 0);
+    zb_unlock();
     return ESP_OK;
 }
 
@@ -1449,7 +1472,9 @@ static esp_err_t schedule_bind_req(const gw_zb_bind_req_ctx_t *in)
     s_bind_req_ctx_by_token[token] = ctx;
     portEXIT_CRITICAL(&s_bind_req_lock);
 
+    zb_lock();
     esp_zb_scheduler_alarm(bind_req_send_cb, token, 0);
+    zb_unlock();
     return ESP_OK;
 }
 

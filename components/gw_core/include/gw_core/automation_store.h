@@ -11,7 +11,7 @@ extern "C" {
 
 #define GW_AUTOMATION_ID_MAX   32
 #define GW_AUTOMATION_NAME_MAX 48
-#define GW_AUTOMATION_JSON_MAX 512
+#define GW_AUTOMATION_JSON_MAX 4096
 
 typedef struct {
     char id[GW_AUTOMATION_ID_MAX];       // stable id (string)
@@ -30,4 +30,3 @@ esp_err_t gw_automation_store_set_enabled(const char *id, bool enabled);
 #ifdef __cplusplus
 }
 #endif
-

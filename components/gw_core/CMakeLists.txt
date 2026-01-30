@@ -16,6 +16,7 @@ idf_component_register(
         esp_timer
         log
         nvs_flash
+        spiffs
         gw_zigbee
         json
 )

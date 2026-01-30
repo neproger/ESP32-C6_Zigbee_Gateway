@@ -964,6 +964,8 @@ esp_err_t gw_http_start(void)
     // We register several API endpoints + a wildcard handler for SPA/static files.
     // Default (8) is too small once UI grows.
     config.max_uri_handlers = 16;
+    // Web UI uses WebSocket + JSON (cJSON), which can be stack-hungry in the httpd task.
+    config.stack_size = 12288;
     s_server_port = config.server_port;
 
     esp_err_t err = httpd_start(&s_server, &config);
