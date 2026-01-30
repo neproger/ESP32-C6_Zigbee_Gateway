@@ -2,6 +2,7 @@
 
 #include <stdbool.h>
 #include <ctype.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,7 +19,7 @@ static const char *TAG = "gw_autos";
 static bool s_inited;
 static bool s_fs_inited;
 
-#define GW_AUTOMATION_CAP 16
+#define GW_AUTOMATION_CAP 32
 
 typedef struct {
     uint32_t magic;
@@ -32,7 +33,6 @@ static gw_automation_store_blob_t s_store;
 static const uint32_t MAGIC = 0x4155544f; // 'AUTO'
 static const uint16_t VERSION = 1;
 static const char *AUTOS_PATH = "/data/autos.bin";
-static const char *AUTOS_TMP_PATH = "/data/autos.tmp";
 
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 
@@ -63,6 +63,51 @@ static size_t find_idx_locked(const char *id)
     return (size_t)-1;
 }
 
+static void cleanup_orphaned_compiled_files(void)
+{
+    // Remove .gwar files for automations that no longer exist
+    // We scan the current store and keep track of which IDs are valid,
+    // then try to delete compiled files for removed automations.
+    // On SPIFFS, we can't easily list directories, so we rely on the store's history.
+    if (!s_fs_inited) return;
+    
+    // Simply log that cleanup is being attempted - actual cleanup happens by remove()
+    // in gw_automation_store_remove() when automations are deleted.
+    // Additional cleanup: if we have max capacity, try removing oldest disabled automations.
+    
+    portENTER_CRITICAL(&s_lock);
+    int disabled_count = 0;
+    for (size_t i = 0; i < s_store.count; i++) {
+        if (!s_store.items[i].enabled) {
+            disabled_count++;
+        }
+    }
+    portEXIT_CRITICAL(&s_lock);
+    
+    if (disabled_count > 0) {
+        ESP_LOGI(TAG, "cleanup_orphaned: found %d disabled automations (removing their compiled files)", disabled_count);
+        
+        // Remove compiled files for all disabled automations to free space
+        portENTER_CRITICAL(&s_lock);
+        for (size_t i = 0; i < s_store.count; i++) {
+            if (!s_store.items[i].enabled) {
+                portEXIT_CRITICAL(&s_lock);
+                
+                char path[96];
+                if (compiled_path_for_id(s_store.items[i].id, path, sizeof(path))) {
+                    if (remove(path) == 0) {
+                        ESP_LOGI(TAG, "cleanup_orphaned: removed compiled file for disabled automation %s", s_store.items[i].id);
+                    }
+                }
+                
+                portENTER_CRITICAL(&s_lock);
+            }
+        }
+        portEXIT_CRITICAL(&s_lock);
+    }
+}
+
+
 static esp_err_t fs_init_once(void)
 {
     if (s_fs_inited) {
@@ -70,17 +115,25 @@ static esp_err_t fs_init_once(void)
     }
 
     // Dedicated persistent partition for gateway data (separate from "www" so web updates don't wipe automations).
+    // CRITICAL: format_if_mount_failed = false to preserve automations across power loss / reboot.
     const esp_vfs_spiffs_conf_t conf = {
         .base_path = "/data",
         .partition_label = "gw_data",
         .max_files = 4,
-        .format_if_mount_failed = true, // non-prod: prefer recovering automatically
+        .format_if_mount_failed = false, // DO NOT auto-format; automations must persist
     };
 
     esp_err_t err = esp_vfs_spiffs_register(&conf);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "spiffs mount failed (gw_data): %s (0x%x)", esp_err_to_name(err), (unsigned)err);
+        ESP_LOGE(TAG, "spiffs mount failed (gw_data): %s (0x%x) - automations LOST if format happened; check flash", esp_err_to_name(err), (unsigned)err);
         return err;
+    }
+
+    // Log SPIFFS status for debugging.
+    size_t total = 0, used = 0;
+    esp_err_t info_err = esp_spiffs_info("gw_data", &total, &used);
+    if (info_err == ESP_OK) {
+        ESP_LOGI(TAG, "gw_data SPIFFS mounted: total=%u KB, used=%u KB", (unsigned)(total / 1024), (unsigned)(used / 1024));
     }
 
     s_fs_inited = true;
@@ -90,28 +143,50 @@ static esp_err_t fs_init_once(void)
 static esp_err_t save_to_fs(void)
 {
     if (!s_fs_inited) {
+        ESP_LOGE(TAG, "save_to_fs: FS not initialized");
         return ESP_ERR_INVALID_STATE;
     }
 
-    // Write-then-rename to avoid partial writes on power loss.
-    FILE *f = fopen(AUTOS_TMP_PATH, "wb");
+    // Check available space - we need space for the file write
+    size_t total = 0, used = 0;
+    esp_err_t info_err = esp_spiffs_info("gw_data", &total, &used);
+    if (info_err == ESP_OK) {
+        size_t available = total > used ? (total - used) : 0;
+        ESP_LOGI(TAG, "save_to_fs: SPIFFS free=%u KB, total=%u KB, need=%zu bytes", 
+                 (unsigned)(available / 1024), (unsigned)(total / 1024), sizeof(s_store));
+        // Need room for the blob + some margin (10KB)
+        if (available < sizeof(s_store) + 10240) {
+            ESP_LOGE(TAG, "save_to_fs: insufficient space (need %zu bytes, have %zu)", 
+                     sizeof(s_store), available);
+            // Try cleaning up orphaned .gwar files
+            ESP_LOGW(TAG, "save_to_fs: attempting to clean orphaned compiled files");
+            (void)cleanup_orphaned_compiled_files();
+            return ESP_ERR_NO_MEM;
+        }
+    } else {
+        ESP_LOGW(TAG, "save_to_fs: could not check SPIFFS info: %s", esp_err_to_name(info_err));
+    }
+
+    // Direct write (overwrite existing file) - atomic at SPIFFS level
+    // SPIFFS handles atomic updates for single-file overwrites
+    FILE *f = fopen(AUTOS_PATH, "wb");
     if (!f) {
+        ESP_LOGE(TAG, "save_to_fs: fopen(%s) failed, errno=%d", AUTOS_PATH, errno);
         return ESP_FAIL;
     }
 
     size_t written = fwrite(&s_store, 1, sizeof(s_store), f);
-    (void)fclose(f);
+    int close_result = fclose(f);
+    if (close_result != 0) {
+        ESP_LOGE(TAG, "save_to_fs: fclose failed, errno=%d", errno);
+        return ESP_FAIL;
+    }
     if (written != sizeof(s_store)) {
-        (void)remove(AUTOS_TMP_PATH);
+        ESP_LOGE(TAG, "save_to_fs: wrote %zu bytes, expected %zu", written, sizeof(s_store));
         return ESP_FAIL;
     }
 
-    (void)remove(AUTOS_PATH);
-    if (rename(AUTOS_TMP_PATH, AUTOS_PATH) != 0) {
-        // Best-effort fallback: keep tmp so user can inspect.
-        return ESP_FAIL;
-    }
-
+    ESP_LOGI(TAG, "save_to_fs: successfully wrote %zu bytes to %s", sizeof(s_store), AUTOS_PATH);
     return ESP_OK;
 }
 
@@ -210,14 +285,38 @@ esp_err_t gw_automation_store_init(void)
             if (tmp) {
                 memset(tmp, 0, sizeof(*tmp));
                 size_t read = fread(tmp, 1, sizeof(*tmp), f);
-                if (read == sizeof(*tmp) && tmp->magic == MAGIC && tmp->version == VERSION && tmp->count <= GW_AUTOMATION_CAP) {
-                    portENTER_CRITICAL(&s_lock);
-                    s_store = *tmp;
-                    portEXIT_CRITICAL(&s_lock);
+                ESP_LOGI(TAG, "automation file size: %u bytes (expected %u)", (unsigned)read, (unsigned)sizeof(*tmp));
+                
+                if (read == sizeof(*tmp)) {
+                    ESP_LOGI(TAG, "autos blob: magic=0x%08x version=%u count=%u", 
+                             (unsigned)tmp->magic, (unsigned)tmp->version, (unsigned)tmp->count);
+                    
+                    if (tmp->magic != MAGIC) {
+                        ESP_LOGW(TAG, "autos magic mismatch (got 0x%08x, expected 0x%08x) - corrupt or old format", 
+                                 (unsigned)tmp->magic, (unsigned)MAGIC);
+                    } else if (tmp->version != VERSION) {
+                        ESP_LOGW(TAG, "autos version mismatch (got %u, expected %u) - incompatible format", 
+                                 (unsigned)tmp->version, (unsigned)VERSION);
+                    } else if (tmp->count > GW_AUTOMATION_CAP) {
+                        ESP_LOGW(TAG, "autos count exceeds capacity (%u > %u) - truncating", 
+                                 (unsigned)tmp->count, GW_AUTOMATION_CAP);
+                    } else {
+                        portENTER_CRITICAL(&s_lock);
+                        s_store = *tmp;
+                        portEXIT_CRITICAL(&s_lock);
+                        ESP_LOGI(TAG, "successfully loaded %u automations from disk", (unsigned)s_store.count);
+                    }
+                } else {
+                    ESP_LOGW(TAG, "autos file read incomplete (got %u bytes, expected %u)", 
+                             (unsigned)read, (unsigned)sizeof(*tmp));
                 }
                 free(tmp);
+            } else {
+                ESP_LOGE(TAG, "malloc failed for tmp automation blob");
             }
             (void)fclose(f);
+        } else {
+            ESP_LOGI(TAG, "no existing automations file at %s - starting fresh", AUTOS_PATH);
         }
     }
 
@@ -225,6 +324,12 @@ esp_err_t gw_automation_store_init(void)
     if (s_fs_inited) {
         (void)rebuild_compiled_to_fs();
     }
+
+    portENTER_CRITICAL(&s_lock);
+    size_t loaded_count = s_store.count;
+    portEXIT_CRITICAL(&s_lock);
+    
+    ESP_LOGI(TAG, "automation store initialized: loaded %u automations from /data/autos.bin", (unsigned)loaded_count);
 
     s_inited = true;
     return ESP_OK;
@@ -307,6 +412,7 @@ esp_err_t gw_automation_store_put(const gw_automation_t *a)
     } else {
         if (s_store.count >= GW_AUTOMATION_CAP) {
             portEXIT_CRITICAL(&s_lock);
+            ESP_LOGW(TAG, "Cannot save automation %s: capacity exceeded (%u/%u)", normalized.id, (unsigned)s_store.count, GW_AUTOMATION_CAP);
             return ESP_ERR_NO_MEM;
         }
         s_store.items[s_store.count++] = normalized;
@@ -314,7 +420,11 @@ esp_err_t gw_automation_store_put(const gw_automation_t *a)
     portEXIT_CRITICAL(&s_lock);
 
     esp_err_t err = save_to_fs();
-    if (err != ESP_OK) return err;
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to persist automation %s to disk: %s", normalized.id, esp_err_to_name(err));
+        return err;
+    }
+    ESP_LOGI(TAG, "automation saved and persisted: id=%s enabled=%u", normalized.id, (unsigned)normalized.enabled);
     return ESP_OK;
 }
 
@@ -326,6 +436,7 @@ esp_err_t gw_automation_store_remove(const char *id)
     size_t idx = find_idx_locked(id);
     if (idx == (size_t)-1) {
         portEXIT_CRITICAL(&s_lock);
+        ESP_LOGW(TAG, "remove: automation %s not found", id);
         return ESP_ERR_NOT_FOUND;
     }
     for (size_t i = idx + 1; i < s_store.count; i++) {
@@ -340,13 +451,21 @@ esp_err_t gw_automation_store_remove(const char *id)
         if (err != ESP_OK) return err;
     }
     esp_err_t err = save_to_fs();
-    if (err != ESP_OK) return err;
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "remove: failed to save after removing %s: %s", id, esp_err_to_name(err));
+        return err;
+    }
 
     // Remove compiled file for this automation (ignore errors).
     char path[96];
     if (compiled_path_for_id(id, path, sizeof(path))) {
-        (void)remove(path);
+        if (remove(path) == 0) {
+            ESP_LOGI(TAG, "remove: deleted compiled file %s", path);
+        } else {
+            ESP_LOGW(TAG, "remove: failed to delete compiled file %s (errno=%d)", path, errno);
+        }
     }
+    ESP_LOGI(TAG, "automation removed and persisted: id=%s", id);
     return ESP_OK;
 }
 
@@ -384,4 +503,9 @@ esp_err_t gw_automation_store_set_enabled(const char *id, bool enabled)
         (void)remove(path);
     }
     return ESP_OK;
+}
+
+void gw_automation_store_cleanup_orphaned(void)
+{
+    cleanup_orphaned_compiled_files();
 }

@@ -8,6 +8,9 @@
 #include "cJSON.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
 
 #include "gw_core/action_exec.h"
 #include "gw_core/device_registry.h"
@@ -180,61 +183,90 @@ static void ws_send_events_since(int fd, uint32_t since, size_t limit)
     free(events);
 }
 
+// Queue used to offload event -> WS JSON build/send from publisher context.
+static QueueHandle_t s_event_q = NULL;
+static TaskHandle_t s_event_task = NULL;
+
+static void ws_event_task_fn(void *arg)
+{
+    (void)arg;
+    gw_event_t e;
+    while (true) {
+        if (xQueueReceive(s_event_q, &e, portMAX_DELAY) == pdTRUE) {
+            int fds[GW_WS_MAX_CLIENTS];
+            size_t fd_count = 0;
+
+            portENTER_CRITICAL(&s_client_lock);
+            for (size_t i = 0; i < GW_WS_MAX_CLIENTS; i++) {
+                if (s_clients[i].fd != 0 && s_clients[i].subscribed_events) {
+                    fds[fd_count++] = s_clients[i].fd;
+                }
+            }
+            portEXIT_CRITICAL(&s_client_lock);
+
+            cJSON *o = cJSON_CreateObject();
+            if (!o) continue;
+
+            cJSON_AddStringToObject(o, "t", "event");
+            cJSON_AddNumberToObject(o, "v", (double)e.v);
+            cJSON_AddNumberToObject(o, "id", (double)e.id);
+            cJSON_AddNumberToObject(o, "ts_ms", (double)e.ts_ms);
+            cJSON_AddStringToObject(o, "type", e.type);
+            cJSON_AddStringToObject(o, "source", e.source);
+            cJSON_AddStringToObject(o, "device_uid", e.device_uid);
+            cJSON_AddNumberToObject(o, "short_addr", (double)e.short_addr);
+            cJSON_AddStringToObject(o, "msg", e.msg);
+
+            if (e.payload_json[0] != '\0') {
+                cJSON *p = cJSON_Parse(e.payload_json);
+                if (p) cJSON_AddItemToObject(o, "payload", p);
+            }
+
+            char *s = cJSON_PrintUnformatted(o);
+            if (!s) {
+                cJSON_Delete(o);
+                continue;
+            }
+
+            for (size_t i = 0; i < fd_count; i++) {
+                int fd = fds[i];
+                if (httpd_ws_get_fd_info(s_server, fd) != HTTPD_WS_CLIENT_WEBSOCKET) {
+                    ws_client_remove_fd(fd);
+                    continue;
+                }
+                (void)ws_send_json_async(fd, s);
+            }
+
+            cJSON_free(s);
+            cJSON_Delete(o);
+        }
+    }
+}
+
 static void ws_publish_event_to_clients(const gw_event_t *e, void *user_ctx)
 {
     (void)user_ctx;
-    if (!s_server || !e) {
-        return;
-    }
-
-    int fds[GW_WS_MAX_CLIENTS];
-    size_t fd_count = 0;
-
+    if (!e || !s_event_q) return;
+    
+    // Early exit if no clients subscribed to events (avoid queue/JSON overhead).
+    bool has_subscribers = false;
     portENTER_CRITICAL(&s_client_lock);
     for (size_t i = 0; i < GW_WS_MAX_CLIENTS; i++) {
         if (s_clients[i].fd != 0 && s_clients[i].subscribed_events) {
-            fds[fd_count++] = s_clients[i].fd;
+            has_subscribers = true;
+            break;
         }
     }
     portEXIT_CRITICAL(&s_client_lock);
-
-    cJSON *o = cJSON_CreateObject();
-    if (!o) {
-        return;
+    
+    if (!has_subscribers) {
+        return;  // No one listening, skip event processing entirely.
     }
-
-    cJSON_AddStringToObject(o, "t", "event");
-    cJSON_AddNumberToObject(o, "v", (double)e->v);
-    cJSON_AddNumberToObject(o, "id", (double)e->id);
-    cJSON_AddNumberToObject(o, "ts_ms", (double)e->ts_ms);
-    cJSON_AddStringToObject(o, "type", e->type);
-    cJSON_AddStringToObject(o, "source", e->source);
-    cJSON_AddStringToObject(o, "device_uid", e->device_uid);
-    cJSON_AddNumberToObject(o, "short_addr", (double)e->short_addr);
-    cJSON_AddStringToObject(o, "msg", e->msg);
-
-    if (e->payload_json[0] != '\0') {
-        cJSON *p = cJSON_Parse(e->payload_json);
-        if (p) cJSON_AddItemToObject(o, "payload", p);
+    
+    // Non-blocking enqueue; if queue is full, drop to avoid blocking publisher.
+    if (xQueueSend(s_event_q, e, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "ws event queue overflow (id=%u type=%s); ws clients may miss event", (unsigned)e->id, e->type);
     }
-
-    char *s = cJSON_PrintUnformatted(o);
-    if (!s) {
-        cJSON_Delete(o);
-        return;
-    }
-
-    for (size_t i = 0; i < fd_count; i++) {
-        int fd = fds[i];
-        if (httpd_ws_get_fd_info(s_server, fd) != HTTPD_WS_CLIENT_WEBSOCKET) {
-            ws_client_remove_fd(fd);
-            continue;
-        }
-        (void)ws_send_json_async(fd, s);
-    }
-
-    cJSON_free(s);
-    cJSON_Delete(o);
 }
 
 static void ws_send_rsp(int fd, cJSON *id, bool ok, const char *err)
@@ -328,13 +360,14 @@ static void ws_handle_req(int fd, cJSON *root)
     }
 
     if (strcmp(m->valuestring, "automations.list") == 0) {
-        const size_t max_autos = 16;
+        const size_t max_autos = 32;  // Match GW_AUTOMATION_CAP
         gw_automation_t *autos = (gw_automation_t *)calloc(max_autos, sizeof(gw_automation_t));
         if (!autos) {
             ws_send_rsp(fd, id, false, "no mem");
             return;
         }
         size_t count = gw_automation_store_list(autos, max_autos);
+        ESP_LOGI("gw_ws", "automations.list: fd=%d, count=%zu", fd, count);
 
         cJSON *o = cJSON_CreateObject();
         cJSON_AddStringToObject(o, "t", "rsp");
@@ -355,7 +388,23 @@ static void ws_handle_req(int fd, cJSON *root)
 
         char *s = cJSON_PrintUnformatted(o);
         if (s) {
-            (void)ws_send_json_async(fd, s);
+            size_t json_len = strlen(s);
+            ESP_LOGI("gw_ws", "automations.list: sending JSON, len=%zu bytes", json_len);
+            
+            // Log first 500 chars for inspection
+            char preview[512] = {0};
+            size_t preview_len = json_len > 500 ? 500 : json_len;
+            memcpy(preview, s, preview_len);
+            ESP_LOGI("gw_ws", "JSON preview: %s%s", preview, preview_len < json_len ? "..." : "");
+            
+            if (json_len > 4096) {
+                ESP_LOGW("gw_ws", "automations.list: JSON response very large (%zu bytes), may be truncated", json_len);
+            }
+            
+            esp_err_t send_err = ws_send_json_async(fd, s);
+            if (send_err != ESP_OK) {
+                ESP_LOGW("gw_ws", "automations.list: ws_send_json_async failed: %s", esp_err_to_name(send_err));
+            }
             cJSON_free(s);
         }
         cJSON_Delete(o);
@@ -396,8 +445,23 @@ static void ws_handle_req(int fd, cJSON *root)
 
         esp_err_t err = gw_automation_store_put(&a);
         if (err != ESP_OK) {
-            char emsg[96];
-            (void)snprintf(emsg, sizeof(emsg), "store failed: %s (0x%x)", esp_err_to_name(err), (unsigned)err);
+            char emsg[128];
+            if (err == ESP_ERR_NO_MEM) {
+                // Try to cleanup orphaned .gwar files and retry once
+                ESP_LOGW("gw_ws", "automations.put: storage full, attempting cleanup of orphaned files");
+                gw_automation_store_cleanup_orphaned();
+                
+                // Retry once after cleanup
+                err = gw_automation_store_put(&a);
+                if (err == ESP_OK) {
+                    gw_event_bus_publish("automation_saved", "ws", "", 0, a.id);
+                    ws_send_rsp(fd, id, true, NULL);
+                    return;
+                }
+                (void)snprintf(emsg, sizeof(emsg), "automation storage full (max %u); delete unused automations first", 32);
+            } else {
+                (void)snprintf(emsg, sizeof(emsg), "store failed: %s (0x%x)", esp_err_to_name(err), (unsigned)err);
+            }
             ws_send_rsp(fd, id, false, emsg);
             return;
         }
@@ -413,12 +477,16 @@ static void ws_handle_req(int fd, cJSON *root)
             ws_send_rsp(fd, id, false, "missing id");
             return;
         }
-        esp_err_t err = gw_automation_store_remove(id_j->valuestring);
+        const char *auto_id = id_j->valuestring;
+        ESP_LOGI("gw_ws", "automations.remove: deleting %s", auto_id);
+        esp_err_t err = gw_automation_store_remove(auto_id);
         if (err != ESP_OK) {
+            ESP_LOGW("gw_ws", "automations.remove: failed to remove %s: %s", auto_id, esp_err_to_name(err));
             ws_send_rsp(fd, id, false, "not found");
             return;
         }
-        gw_event_bus_publish("automation_removed", "ws", "", 0, id_j->valuestring);
+        gw_event_bus_publish("automation_removed", "ws", "", 0, auto_id);
+        ESP_LOGI("gw_ws", "automations.remove: successfully deleted %s", auto_id);
         ws_send_rsp(fd, id, true, NULL);
         return;
     }
@@ -1154,6 +1222,18 @@ esp_err_t gw_ws_register(httpd_handle_t server)
         ESP_LOGW(TAG, "event listener not installed: %s", esp_err_to_name(err));
     }
 
+    // Create internal queue/task for offloading event -> WS work.
+    if (!s_event_q) {
+        s_event_q = xQueueCreate(32, sizeof(gw_event_t));
+    }
+    if (s_event_q && !s_event_task) {
+        BaseType_t ok = xTaskCreate(ws_event_task_fn, "ws_events", 4096, NULL, 4, &s_event_task);
+        if (ok != pdPASS) {
+            s_event_task = NULL;
+            ESP_LOGW(TAG, "failed to create ws event task");
+        }
+    }
+
     ESP_LOGI(TAG, "WebSocket enabled at /ws");
     return ESP_OK;
 }
@@ -1169,4 +1249,13 @@ void gw_ws_unregister(void)
     memset(s_clients, 0, sizeof(s_clients));
     portEXIT_CRITICAL(&s_client_lock);
     s_server = NULL;
+    // Cleanup event task/queue
+    if (s_event_task) {
+        vTaskDelete(s_event_task);
+        s_event_task = NULL;
+    }
+    if (s_event_q) {
+        vQueueDelete(s_event_q);
+        s_event_q = NULL;
+    }
 }

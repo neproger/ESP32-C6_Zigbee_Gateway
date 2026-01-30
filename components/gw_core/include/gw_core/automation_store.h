@@ -35,6 +35,9 @@ esp_err_t gw_automation_store_put(const gw_automation_t *a);
 esp_err_t gw_automation_store_remove(const char *id);
 esp_err_t gw_automation_store_set_enabled(const char *id, bool enabled);
 
+// Cleanup orphaned .gwar compiled files (best-effort, no error if fails)
+void gw_automation_store_cleanup_orphaned(void);
+
 #ifdef __cplusplus
 }
 #endif

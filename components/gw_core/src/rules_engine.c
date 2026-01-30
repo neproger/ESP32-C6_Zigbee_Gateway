@@ -646,7 +646,9 @@ static void rules_event_listener(const gw_event_t *event, void *user_ctx)
     if (!s_inited || !s_q || !event) {
         return;
     }
-    (void)xQueueSend(s_q, event, 0);
+    if (xQueueSend(s_q, event, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "rules event queue overflow (id=%u type=%s); event lost", (unsigned)event->id, event->type);
+    }
 }
 
 esp_err_t gw_rules_init(void)

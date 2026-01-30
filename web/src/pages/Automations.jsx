@@ -28,11 +28,19 @@ async function wsReq(method, params, { timeoutMs = 3500 } = {}) {
     ws.onmessage = (ev) => {
       try {
         const msg = JSON.parse(String(ev?.data ?? ''))
-        if (msg?.t !== 'rsp') return
-        if (String(msg?.id ?? '') !== id) return
+        console.log('[wsReq]', method, 'response:', msg)
+        if (msg?.t !== 'rsp') {
+          console.log('[wsReq]', method, 'ignoring non-rsp message, t=', msg?.t)
+          return
+        }
+        if (String(msg?.id ?? '') !== id) {
+          console.log('[wsReq]', method, 'ignoring wrong id, got', msg?.id, 'expected', id)
+          return
+        }
         clearTimeout(t)
         resolve(msg)
-      } catch {
+      } catch (e) {
+        console.log('[wsReq]', method, 'JSON parse error:', e)
         // ignore
       }
     }
@@ -45,6 +53,7 @@ async function wsReq(method, params, { timeoutMs = 3500 } = {}) {
     }
   })
 
+  console.log('[wsReq]', method, 'sending request, id=', id, 'params=', params)
   ws.send(JSON.stringify({ t: 'req', id, m: method, p: params }))
   const rsp = await waitForRsp
   try {
