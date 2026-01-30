@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "cJSON.h"
+#include "esp_err.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -15,6 +16,7 @@
 #include "freertos/task.h"
 
 #include "gw_core/action_exec.h"
+#include "gw_core/automation_compiled.h"
 #include "gw_core/automation_store.h"
 #include "gw_core/state_store.h"
 
@@ -23,6 +25,14 @@ static const char *TAG = "gw_rules";
 static bool s_inited;
 static QueueHandle_t s_q;
 static TaskHandle_t s_task;
+
+typedef struct {
+    char id[GW_AUTOMATION_ID_MAX];
+    gw_auto_compiled_t compiled;
+} gw_rule_entry_t;
+
+static gw_rule_entry_t *s_rules;
+static size_t s_rule_count;
 
 static void set_err(char *out, size_t out_size, const char *msg)
 {
@@ -35,314 +45,462 @@ static void set_err(char *out, size_t out_size, const char *msg)
     out[out_size - 1] = '\0';
 }
 
-static bool json_truthy(const cJSON *j)
+static const char *strtab_at(const gw_auto_compiled_t *c, uint32_t off)
 {
-    if (cJSON_IsBool(j)) return cJSON_IsTrue(j);
-    if (cJSON_IsNumber(j)) return fabs(j->valuedouble) > 0.000001;
-    if (cJSON_IsString(j) && j->valuestring) return j->valuestring[0] != '\0';
-    return false;
+    if (!c) return "";
+    if (off == 0) return "";
+    if (off >= c->hdr.strings_size) return "";
+    return c->strings + off;
 }
 
-static bool parse_number_like(const cJSON *j, double *out)
+static bool is_safe_id_char(char c)
 {
-    if (!out) return false;
-    if (cJSON_IsNumber(j)) {
-        *out = j->valuedouble;
-        return true;
-    }
-    if (cJSON_IsBool(j)) {
-        *out = cJSON_IsTrue(j) ? 1.0 : 0.0;
-        return true;
-    }
-    if (cJSON_IsString(j) && j->valuestring && j->valuestring[0] != '\0') {
-        char *end = NULL;
-        double v = strtod(j->valuestring, &end);
-        if (end && *end == '\0') {
-            *out = v;
-            return true;
-        }
-        // Support hex like "0x0006"
-        end = NULL;
-        unsigned long uv = strtoul(j->valuestring, &end, 0);
-        if (end && *end == '\0') {
-            *out = (double)uv;
-            return true;
-        }
-    }
-    return false;
+    return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_' || c == '-';
 }
 
-static const cJSON *payload_get_path(const cJSON *payload, const char *path)
+static bool compiled_path_for_id(const char *id, char *out, size_t out_size)
 {
-    if (!payload || !cJSON_IsObject(payload) || !path || path[0] == '\0') {
-        return NULL;
+    if (!id || !id[0] || !out || out_size < 16) return false;
+    for (const char *p = id; *p; p++) {
+        if (!is_safe_id_char(*p)) return false;
     }
-
-    const cJSON *cur = payload;
-    const char *p = path;
-    while (*p) {
-        const char *dot = strchr(p, '.');
-        size_t len = dot ? (size_t)(dot - p) : strlen(p);
-        if (len == 0) {
-            return NULL;
-        }
-
-        char key[32];
-        if (len >= sizeof(key)) {
-            return NULL;
-        }
-        memcpy(key, p, len);
-        key[len] = '\0';
-
-        cur = cJSON_GetObjectItemCaseSensitive((cJSON *)cur, key);
-        if (!cur) return NULL;
-
-        if (!dot) break;
-        if (!cJSON_IsObject(cur)) return NULL;
-        p = dot + 1;
-    }
-    return cur;
+    int n = snprintf(out, out_size, "/data/%s.gwar", id);
+    return n > 0 && (size_t)n < out_size;
 }
 
-static bool match_value(const cJSON *expected, const char *actual_s, double actual_n, bool has_actual_s, bool has_actual_n, bool actual_bool, bool has_actual_bool)
+static void rules_cache_clear(void)
 {
-    if (!expected) return false;
-
-    if (cJSON_IsString(expected) && expected->valuestring) {
-        if (has_actual_s) {
-            return strcmp(expected->valuestring, actual_s) == 0;
-        }
-        if (has_actual_n) {
-            double exp_n = 0;
-            cJSON *tmp = cJSON_CreateString(expected->valuestring);
-            bool ok = parse_number_like(tmp, &exp_n);
-            cJSON_Delete(tmp);
-            if (ok) {
-                return fabs(exp_n - actual_n) < 0.000001;
-            }
-        }
-        if (has_actual_bool) {
-            if (strcmp(expected->valuestring, "true") == 0) return actual_bool;
-            if (strcmp(expected->valuestring, "false") == 0) return !actual_bool;
-        }
-        return false;
+    for (size_t i = 0; i < s_rule_count; i++) {
+        gw_auto_compiled_free(&s_rules[i].compiled);
     }
-
-    if (cJSON_IsNumber(expected)) {
-        double exp_n = expected->valuedouble;
-        if (has_actual_n) return fabs(exp_n - actual_n) < 0.000001;
-        if (has_actual_s) {
-            double act_n = 0;
-            cJSON *tmp = cJSON_CreateString(actual_s);
-            bool ok = parse_number_like(tmp, &act_n);
-            cJSON_Delete(tmp);
-            if (ok) return fabs(exp_n - act_n) < 0.000001;
-        }
-        if (has_actual_bool) return fabs(exp_n - (actual_bool ? 1.0 : 0.0)) < 0.000001;
-        return false;
-    }
-
-    if (cJSON_IsBool(expected)) {
-        bool exp_b = cJSON_IsTrue(expected);
-        if (has_actual_bool) return exp_b == actual_bool;
-        if (has_actual_n) return exp_b == (fabs(actual_n) > 0.000001);
-        if (has_actual_s) {
-            if (strcmp(actual_s, "true") == 0) return exp_b;
-            if (strcmp(actual_s, "false") == 0) return !exp_b;
-        }
-        return false;
-    }
-
-    return false;
+    free(s_rules);
+    s_rules = NULL;
+    s_rule_count = 0;
 }
 
-static bool match_event_field(const char *key, const cJSON *expected, const gw_event_t *e, const cJSON *payload)
+static ssize_t rules_find_idx(const char *id)
 {
-    if (!key || !expected || !e) return false;
-
-    if (strncmp(key, "payload.", 8) == 0) {
-        const cJSON *v = payload_get_path(payload, key + 8);
-        if (!v) return false;
-
-        if (cJSON_IsString(v) && v->valuestring) {
-            return match_value(expected, v->valuestring, 0, true, false, false, false);
+    if (!id || !id[0]) return -1;
+    for (size_t i = 0; i < s_rule_count; i++) {
+        if (strncmp(s_rules[i].id, id, sizeof(s_rules[i].id)) == 0) {
+            return (ssize_t)i;
         }
-        if (cJSON_IsNumber(v)) {
-            return match_value(expected, NULL, v->valuedouble, false, true, false, false);
-        }
-        if (cJSON_IsBool(v)) {
-            return match_value(expected, NULL, 0, false, false, cJSON_IsTrue(v), true);
-        }
-        return false;
     }
-
-    if (strcmp(key, "type") == 0) {
-        return match_value(expected, e->type, 0, true, false, false, false);
-    }
-    if (strcmp(key, "source") == 0) {
-        return match_value(expected, e->source, 0, true, false, false, false);
-    }
-    if (strcmp(key, "device_uid") == 0) {
-        return match_value(expected, e->device_uid, 0, true, false, false, false);
-    }
-    if (strcmp(key, "short_addr") == 0) {
-        return match_value(expected, NULL, (double)e->short_addr, false, true, false, false);
-    }
-
-    return false;
+    return -1;
 }
 
-static bool trigger_matches(const cJSON *trigger, const gw_event_t *e, const cJSON *payload)
+static void rules_remove_idx(size_t idx)
 {
-    if (!cJSON_IsObject(trigger) || !e) return false;
-
-    const cJSON *type_j = cJSON_GetObjectItemCaseSensitive((cJSON *)trigger, "type");
-    if (!cJSON_IsString(type_j) || !type_j->valuestring || strcmp(type_j->valuestring, "event") != 0) {
-        return false;
+    if (idx >= s_rule_count) return;
+    gw_auto_compiled_free(&s_rules[idx].compiled);
+    for (size_t i = idx + 1; i < s_rule_count; i++) {
+        s_rules[i - 1] = s_rules[i];
     }
-
-    const cJSON *event_type_j = cJSON_GetObjectItemCaseSensitive((cJSON *)trigger, "event_type");
-    if (!cJSON_IsString(event_type_j) || !event_type_j->valuestring) {
-        return false;
+    s_rule_count--;
+    if (s_rule_count == 0) {
+        free(s_rules);
+        s_rules = NULL;
+        return;
     }
-    if (strcmp(event_type_j->valuestring, e->type) != 0) {
-        return false;
-    }
-
-    const cJSON *match = cJSON_GetObjectItemCaseSensitive((cJSON *)trigger, "match");
-    if (!match) return true;
-    if (!cJSON_IsObject(match)) return false;
-
-    cJSON *it = NULL;
-    cJSON_ArrayForEach(it, (cJSON *)match)
-    {
-        if (!it || !it->string) return false;
-        if (!match_event_field(it->string, it, e, payload)) {
-            return false;
-        }
-    }
-    return true;
+    gw_rule_entry_t *shrunk = (gw_rule_entry_t *)realloc(s_rules, s_rule_count * sizeof(gw_rule_entry_t));
+    if (shrunk) s_rules = shrunk;
 }
 
-static bool condition_passes(const cJSON *cond, const gw_event_t *e)
+static void rules_remove_id(const char *id)
 {
-    (void)e;
-    if (!cJSON_IsObject(cond)) return false;
-
-    const cJSON *type_j = cJSON_GetObjectItemCaseSensitive((cJSON *)cond, "type");
-    if (!cJSON_IsString(type_j) || !type_j->valuestring || strcmp(type_j->valuestring, "state") != 0) {
-        return false;
+    ssize_t idx = rules_find_idx(id);
+    if (idx >= 0) {
+        rules_remove_idx((size_t)idx);
     }
-
-    const cJSON *op_j = cJSON_GetObjectItemCaseSensitive((cJSON *)cond, "op");
-    const cJSON *ref_j = cJSON_GetObjectItemCaseSensitive((cJSON *)cond, "ref");
-    const cJSON *value_j = cJSON_GetObjectItemCaseSensitive((cJSON *)cond, "value");
-    if (!cJSON_IsString(op_j) || !op_j->valuestring) return false;
-    if (!cJSON_IsObject(ref_j)) return false;
-    if (!value_j) return false;
-
-    const cJSON *uid_j = cJSON_GetObjectItemCaseSensitive((cJSON *)ref_j, "device_uid");
-    const cJSON *key_j = cJSON_GetObjectItemCaseSensitive((cJSON *)ref_j, "key");
-    if (!cJSON_IsString(uid_j) || !uid_j->valuestring || uid_j->valuestring[0] == '\0') return false;
-    if (!cJSON_IsString(key_j) || !key_j->valuestring || key_j->valuestring[0] == '\0') return false;
-
-    gw_device_uid_t uid = {0};
-    strlcpy(uid.uid, uid_j->valuestring, sizeof(uid.uid));
-
-    gw_state_item_t item = {0};
-    if (gw_state_store_get(&uid, key_j->valuestring, &item) != ESP_OK) {
-        return false;
-    }
-
-    double actual = 0;
-    switch (item.value_type) {
-    case GW_STATE_VALUE_BOOL:
-        actual = item.value_bool ? 1.0 : 0.0;
-        break;
-    case GW_STATE_VALUE_F32:
-        actual = (double)item.value_f32;
-        break;
-    case GW_STATE_VALUE_U32:
-        actual = (double)item.value_u32;
-        break;
-    case GW_STATE_VALUE_U64:
-        actual = (double)item.value_u64;
-        break;
-    default:
-        return false;
-    }
-
-    double expected = 0;
-    if (!parse_number_like(value_j, &expected)) {
-        expected = json_truthy(value_j) ? 1.0 : 0.0;
-    }
-
-    const char *op = op_j->valuestring;
-    if (strcmp(op, "==") == 0) return fabs(actual - expected) < 0.000001;
-    if (strcmp(op, "!=") == 0) return fabs(actual - expected) >= 0.000001;
-    if (strcmp(op, ">") == 0) return actual > expected;
-    if (strcmp(op, "<") == 0) return actual < expected;
-    if (strcmp(op, ">=") == 0) return actual >= expected;
-    if (strcmp(op, "<=") == 0) return actual <= expected;
-
-    return false;
 }
 
-static bool conditions_pass(const cJSON *conds, const gw_event_t *e)
+static esp_err_t rules_load_compiled_for_id(const char *id, gw_auto_compiled_t *out, char *err, size_t err_size)
 {
-    if (!conds) return true;
-    if (!cJSON_IsArray(conds)) return false;
-
-    cJSON *it = NULL;
-    cJSON_ArrayForEach(it, (cJSON *)conds)
-    {
-        if (!condition_passes(it, e)) {
-            return false;
-        }
+    set_err(err, err_size, NULL);
+    if (!id || !id[0] || !out) {
+        set_err(err, err_size, "bad args");
+        return ESP_ERR_INVALID_ARG;
     }
-    return true;
+
+    // Runtime executes ONLY compiled rules. Compilation happens on save in the store.
+    char path[96];
+    if (compiled_path_for_id(id, path, sizeof(path))) {
+        esp_err_t rc = gw_auto_compiled_read_file(path, out);
+        if (rc == ESP_OK) return ESP_OK;
+    }
+
+    set_err(err, err_size, "no compiled rule (save automation again)");
+    return ESP_ERR_NOT_FOUND;
 }
 
-static void publish_rules_fired(const gw_event_t *e, const gw_automation_t *a)
+static esp_err_t rules_upsert_id(const char *id, bool enabled, char *err, size_t err_size)
+{
+    set_err(err, err_size, NULL);
+    if (!id || !id[0]) {
+        set_err(err, err_size, "missing id");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (!enabled) {
+        rules_remove_id(id);
+        return ESP_OK;
+    }
+
+    // Free existing rule first to avoid peak heap usage during recompilation.
+    rules_remove_id(id);
+
+    gw_rule_entry_t *grown = (gw_rule_entry_t *)realloc(s_rules, (s_rule_count + 1) * sizeof(gw_rule_entry_t));
+    if (!grown) {
+        set_err(err, err_size, "no mem");
+        return ESP_ERR_NO_MEM;
+    }
+    s_rules = grown;
+
+    gw_rule_entry_t *re = &s_rules[s_rule_count];
+    memset(re, 0, sizeof(*re));
+    strlcpy(re->id, id, sizeof(re->id));
+
+    esp_err_t rc = rules_load_compiled_for_id(id, &re->compiled, err, err_size);
+    if (rc != ESP_OK) {
+        // Roll back the entry if load failed.
+        gw_auto_compiled_free(&re->compiled);
+        memset(re, 0, sizeof(*re));
+        return rc;
+    }
+
+    s_rule_count++;
+    return ESP_OK;
+}
+
+static void publish_rules_fired(const gw_event_t *e, const char *automation_id)
 {
     char msg[96];
-    (void)snprintf(msg, sizeof(msg), "automation=%s", a ? a->id : "");
+    (void)snprintf(msg, sizeof(msg), "automation=%s", automation_id ? automation_id : "");
 
     char payload[192];
     (void)snprintf(payload,
                    sizeof(payload),
                    "{\"automation_id\":\"%s\",\"event_id\":%u,\"event_type\":\"%s\"}",
-                   a ? a->id : "",
+                   automation_id ? automation_id : "",
                    (unsigned)(e ? e->id : 0),
                    e ? e->type : "");
 
     gw_event_bus_publish_ex("rules.fired", "rules", e ? e->device_uid : "", e ? e->short_addr : 0, msg, payload);
 }
 
-static void publish_rules_action(const gw_event_t *e, const gw_automation_t *a, size_t idx, bool ok, const char *err)
+static void publish_rules_action(const gw_event_t *e, const char *automation_id, size_t idx, bool ok, const char *err)
 {
     char msg[96];
-    (void)snprintf(msg, sizeof(msg), "automation=%s idx=%u ok=%u", a ? a->id : "", (unsigned)idx, ok ? 1U : 0U);
+    (void)snprintf(msg,
+                   sizeof(msg),
+                   "automation=%s idx=%u ok=%u",
+                   automation_id ? automation_id : "",
+                   (unsigned)idx,
+                   ok ? 1U : 0U);
 
     char payload[192];
     if (err && err[0] != '\0') {
-        // Keep payload small; err is bounded by caller.
         (void)snprintf(payload,
                        sizeof(payload),
                        "{\"automation_id\":\"%s\",\"idx\":%u,\"ok\":false,\"err\":\"%s\"}",
-                       a ? a->id : "",
+                       automation_id ? automation_id : "",
                        (unsigned)idx,
                        err);
     } else {
         (void)snprintf(payload,
                        sizeof(payload),
                        "{\"automation_id\":\"%s\",\"idx\":%u,\"ok\":%s}",
-                       a ? a->id : "",
+                       automation_id ? automation_id : "",
                        (unsigned)idx,
                        ok ? "true" : "false");
     }
 
     gw_event_bus_publish_ex("rules.action", "rules", e ? e->device_uid : "", e ? e->short_addr : 0, msg, payload);
+}
+
+static void publish_cache_update(const char *id, const char *op, bool ok, const char *err)
+{
+    char msg[128];
+    (void)snprintf(msg,
+                   sizeof(msg),
+                   "op=%s id=%s ok=%u rules=%u",
+                   op ? op : "",
+                   id ? id : "",
+                   ok ? 1U : 0U,
+                   (unsigned)s_rule_count);
+
+    char payload[192];
+    if (err && err[0]) {
+        (void)snprintf(payload,
+                       sizeof(payload),
+                       "{\"op\":\"%s\",\"id\":\"%s\",\"ok\":false,\"rules\":%u,\"err\":\"%s\"}",
+                       op ? op : "",
+                       id ? id : "",
+                       (unsigned)s_rule_count,
+                       err);
+    } else {
+        (void)snprintf(payload,
+                       sizeof(payload),
+                       "{\"op\":\"%s\",\"id\":\"%s\",\"ok\":%s,\"rules\":%u}",
+                       op ? op : "",
+                       id ? id : "",
+                       ok ? "true" : "false",
+                       (unsigned)s_rule_count);
+    }
+
+    gw_event_bus_publish_ex("rules.cache", "rules", "", 0, msg, payload);
+}
+
+static bool parse_id_from_msg(const char *msg, char *out, size_t out_size)
+{
+    if (!out || out_size == 0) return false;
+    out[0] = '\0';
+    if (!msg) return false;
+
+    // Support both: "<id>" and "id=<id> ..."
+    const char *p = msg;
+    if (strncmp(p, "id=", 3) == 0) {
+        p += 3;
+    }
+
+    size_t n = 0;
+    while (p[n] && p[n] != ' ' && p[n] != '\t' && p[n] != '\r' && p[n] != '\n') {
+        n++;
+    }
+    if (n == 0) return false;
+    if (n >= out_size) n = out_size - 1;
+    memcpy(out, p, n);
+    out[n] = '\0';
+    return true;
+}
+
+static bool parse_enabled_event(const gw_event_t *e, char *out_id, size_t out_id_size, bool *out_enabled)
+{
+    if (!e || !out_id || out_id_size == 0 || !out_enabled) return false;
+    out_id[0] = '\0';
+    *out_enabled = false;
+
+    if (e->payload_json[0]) {
+        cJSON *p = cJSON_Parse(e->payload_json);
+        if (p) {
+            cJSON *id_j = cJSON_GetObjectItemCaseSensitive(p, "id");
+            cJSON *en_j = cJSON_GetObjectItemCaseSensitive(p, "enabled");
+            if (cJSON_IsString(id_j) && id_j->valuestring && id_j->valuestring[0] && cJSON_IsBool(en_j)) {
+                strlcpy(out_id, id_j->valuestring, out_id_size);
+                *out_enabled = cJSON_IsTrue(en_j);
+                cJSON_Delete(p);
+                return true;
+            }
+            cJSON_Delete(p);
+        }
+    }
+
+    // Fallback: parse msg "id=<id> enabled=0/1"
+    if (parse_id_from_msg(e->msg, out_id, out_id_size)) {
+        const char *en = strstr(e->msg, "enabled=");
+        if (en) {
+            en += 8;
+            *out_enabled = (*en == '1' || *en == 't' || *en == 'T');
+        }
+        return true;
+    }
+
+    return false;
+}
+
+typedef struct {
+    uint8_t endpoint;
+    bool has_endpoint;
+    const char *cmd;
+    bool has_cmd;
+    uint16_t cluster_id;
+    bool has_cluster;
+    uint16_t attr_id;
+    bool has_attr;
+} event_payload_view_t;
+
+static bool parse_u16_any_json(const cJSON *j, uint16_t *out)
+{
+    if (!out) return false;
+    if (cJSON_IsNumber(j) && j->valuedouble >= 0 && j->valuedouble <= 65535) {
+        *out = (uint16_t)j->valuedouble;
+        return true;
+    }
+    if (cJSON_IsString(j) && j->valuestring && j->valuestring[0]) {
+        char *end = NULL;
+        unsigned long v = strtoul(j->valuestring, &end, 0);
+        if (end && *end == '\0' && v <= 65535UL) {
+            *out = (uint16_t)v;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void build_payload_view(const cJSON *payload, event_payload_view_t *out)
+{
+    if (!out) return;
+    *out = (event_payload_view_t){0};
+    if (!payload || !cJSON_IsObject(payload)) return;
+
+    const cJSON *ep = cJSON_GetObjectItemCaseSensitive((cJSON *)payload, "endpoint");
+    if (cJSON_IsNumber(ep) && ep->valuedouble >= 0 && ep->valuedouble <= 255) {
+        out->endpoint = (uint8_t)ep->valuedouble;
+        out->has_endpoint = true;
+    }
+
+    const cJSON *cmd = cJSON_GetObjectItemCaseSensitive((cJSON *)payload, "cmd");
+    if (cJSON_IsString(cmd) && cmd->valuestring) {
+        out->cmd = cmd->valuestring;
+        out->has_cmd = true;
+    }
+
+    uint16_t v = 0;
+    const cJSON *cluster = cJSON_GetObjectItemCaseSensitive((cJSON *)payload, "cluster");
+    if (parse_u16_any_json(cluster, &v)) {
+        out->cluster_id = v;
+        out->has_cluster = true;
+    }
+
+    const cJSON *attr = cJSON_GetObjectItemCaseSensitive((cJSON *)payload, "attr");
+    if (parse_u16_any_json(attr, &v)) {
+        out->attr_id = v;
+        out->has_attr = true;
+    }
+}
+
+static gw_auto_evt_type_t evt_type_from_event(const gw_event_t *e)
+{
+    if (!e || e->type[0] == '\0') return 0;
+    if (strcmp(e->type, "zigbee.command") == 0) return GW_AUTO_EVT_ZIGBEE_COMMAND;
+    if (strcmp(e->type, "zigbee.attr_report") == 0) return GW_AUTO_EVT_ZIGBEE_ATTR_REPORT;
+    if (strcmp(e->type, "device.join") == 0) return GW_AUTO_EVT_DEVICE_JOIN;
+    if (strcmp(e->type, "device.leave") == 0) return GW_AUTO_EVT_DEVICE_LEAVE;
+    return 0;
+}
+
+static bool trigger_matches_compiled(const gw_auto_compiled_t *c,
+                                    const gw_auto_bin_trigger_v2_t *t,
+                                    gw_auto_evt_type_t evt_type,
+                                    const gw_event_t *e,
+                                    const event_payload_view_t *pv)
+{
+    if (!c || !t || !e) return false;
+    if ((gw_auto_evt_type_t)t->event_type != evt_type) return false;
+
+    if (t->device_uid_off) {
+        const char *uid = strtab_at(c, t->device_uid_off);
+        if (uid[0] && strcmp(uid, e->device_uid) != 0) return false;
+    }
+
+    if (t->endpoint) {
+        if (!pv || !pv->has_endpoint) return false;
+        if (pv->endpoint != t->endpoint) return false;
+    }
+
+    if (evt_type == GW_AUTO_EVT_ZIGBEE_COMMAND) {
+        if (t->cmd_off) {
+            const char *cmd = strtab_at(c, t->cmd_off);
+            if (!pv || !pv->has_cmd) return false;
+            if (strcmp(cmd, pv->cmd) != 0) return false;
+        }
+        if (t->cluster_id) {
+            if (!pv || !pv->has_cluster) return false;
+            if (pv->cluster_id != t->cluster_id) return false;
+        }
+    } else if (evt_type == GW_AUTO_EVT_ZIGBEE_ATTR_REPORT) {
+        if (t->cluster_id) {
+            if (!pv || !pv->has_cluster) return false;
+            if (pv->cluster_id != t->cluster_id) return false;
+        }
+        if (t->attr_id) {
+            if (!pv || !pv->has_attr) return false;
+            if (pv->attr_id != t->attr_id) return false;
+        }
+    }
+
+    return true;
+}
+
+static bool state_to_number_bool(const gw_state_item_t *s, double *out_n, bool *out_b)
+{
+    if (!s) return false;
+    if (out_b) *out_b = false;
+    if (out_n) *out_n = 0;
+
+    switch (s->value_type) {
+    case GW_STATE_VALUE_BOOL:
+        if (out_b) *out_b = s->value_bool;
+        if (out_n) *out_n = s->value_bool ? 1.0 : 0.0;
+        return true;
+    case GW_STATE_VALUE_F32:
+        if (out_n) *out_n = (double)s->value_f32;
+        if (out_b) *out_b = fabs((double)s->value_f32) > 0.000001;
+        return true;
+    case GW_STATE_VALUE_U32:
+        if (out_n) *out_n = (double)s->value_u32;
+        if (out_b) *out_b = s->value_u32 != 0;
+        return true;
+    case GW_STATE_VALUE_U64:
+        if (out_n) *out_n = (double)s->value_u64;
+        if (out_b) *out_b = s->value_u64 != 0;
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool conditions_pass_compiled(const gw_auto_compiled_t *c, const gw_auto_bin_condition_v2_t *conds, uint32_t cond_count)
+{
+    if (!c || cond_count == 0) return true;
+    if (!conds) return true;
+
+    for (uint32_t i = 0; i < cond_count; i++) {
+        const gw_auto_bin_condition_v2_t *co = &conds[i];
+        const char *uid_s = strtab_at(c, co->device_uid_off);
+        const char *key = strtab_at(c, co->key_off);
+        if (!uid_s[0] || !key[0]) {
+            return false;
+        }
+
+        gw_device_uid_t uid = {0};
+        strlcpy(uid.uid, uid_s, sizeof(uid.uid));
+
+        gw_state_item_t st = {0};
+        if (gw_state_store_get(&uid, key, &st) != ESP_OK) {
+            return false;
+        }
+
+        double actual_n = 0;
+        bool actual_b = false;
+        if (!state_to_number_bool(&st, &actual_n, &actual_b)) {
+            return false;
+        }
+
+        const gw_auto_op_t op = (gw_auto_op_t)co->op;
+        if (co->val_type == GW_AUTO_VAL_BOOL) {
+            const bool exp = (co->v.b != 0);
+            const bool act = actual_b;
+            if (op == GW_AUTO_OP_EQ && act != exp) return false;
+            if (op == GW_AUTO_OP_NE && act == exp) return false;
+            if (op == GW_AUTO_OP_GT && !(act > exp)) return false;
+            if (op == GW_AUTO_OP_LT && !(act < exp)) return false;
+            if (op == GW_AUTO_OP_GE && !(act >= exp)) return false;
+            if (op == GW_AUTO_OP_LE && !(act <= exp)) return false;
+        } else {
+            const double exp = co->v.f64;
+            const double act = actual_n;
+            const double eps = 0.000001;
+            if (op == GW_AUTO_OP_EQ && fabs(act - exp) > eps) return false;
+            if (op == GW_AUTO_OP_NE && fabs(act - exp) <= eps) return false;
+            if (op == GW_AUTO_OP_GT && !(act > exp)) return false;
+            if (op == GW_AUTO_OP_LT && !(act < exp)) return false;
+            if (op == GW_AUTO_OP_GE && !(act >= exp)) return false;
+            if (op == GW_AUTO_OP_LE && !(act <= exp)) return false;
+        }
+    }
+
+    return true;
 }
 
 static void process_event(const gw_event_t *e)
@@ -353,83 +511,122 @@ static void process_event(const gw_event_t *e)
     if (strcmp(e->source, "rules") == 0) return;
     if (strncmp(e->type, "rules.", 6) == 0) return;
 
-    const size_t max_autos = 16;
-    gw_automation_t *autos = (gw_automation_t *)calloc(max_autos, sizeof(gw_automation_t));
-    if (!autos) {
+    // Control events: update compiled cache incrementally (avoid reloading all rules).
+    if (strcmp(e->type, "automation_saved") == 0) {
+        char id[GW_AUTOMATION_ID_MAX] = {0};
+        if (parse_id_from_msg(e->msg, id, sizeof(id))) {
+            char errbuf[96];
+            esp_err_t rc = rules_upsert_id(id, true, errbuf, sizeof(errbuf));
+            if (rc != ESP_OK) {
+                // If it was saved as disabled, ensure it's not active and don't spam logs.
+                if (rc == ESP_ERR_INVALID_STATE && strcmp(errbuf, "disabled") == 0) {
+                    rules_remove_id(id);
+                    publish_cache_update(id, "saved", true, NULL);
+                } else {
+                    ESP_LOGW(TAG, "rule upsert failed (%s): %s", id, errbuf[0] ? errbuf : "err");
+                    publish_cache_update(id, "saved", false, errbuf[0] ? errbuf : "err");
+                }
+            } else {
+                publish_cache_update(id, "saved", true, NULL);
+            }
+        }
+        return;
+    }
+    if (strcmp(e->type, "automation_removed") == 0) {
+        char id[GW_AUTOMATION_ID_MAX] = {0};
+        if (parse_id_from_msg(e->msg, id, sizeof(id))) {
+            rules_remove_id(id);
+            publish_cache_update(id, "removed", true, NULL);
+        }
+        return;
+    }
+    if (strcmp(e->type, "automation_enabled") == 0) {
+        char id[GW_AUTOMATION_ID_MAX] = {0};
+        bool enabled = false;
+        if (parse_enabled_event(e, id, sizeof(id), &enabled) && id[0]) {
+            char errbuf[96];
+            esp_err_t rc = rules_upsert_id(id, enabled, errbuf, sizeof(errbuf));
+            if (rc != ESP_OK) {
+                ESP_LOGW(TAG, "rule upsert failed (%s): %s", id, errbuf[0] ? errbuf : "err");
+                publish_cache_update(id, enabled ? "enabled" : "disabled", false, errbuf[0] ? errbuf : "err");
+            } else {
+                publish_cache_update(id, enabled ? "enabled" : "disabled", true, NULL);
+            }
+        }
         return;
     }
 
-    size_t count = gw_automation_store_list(autos, max_autos);
+    const gw_auto_evt_type_t evt_type = evt_type_from_event(e);
+    if (!evt_type) return;
+
+    // If no rules are loaded, log once in a while to make debugging easier.
+    if (s_rule_count == 0) {
+        static uint64_t s_last_no_rules_ms;
+        const uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+        if (now_ms - s_last_no_rules_ms > 10000) {
+            s_last_no_rules_ms = now_ms;
+            publish_cache_update(NULL, "no_rules", false, "no rules loaded (save+enable automation)");
+        }
+        return;
+    }
 
     cJSON *payload = NULL;
     if (e->payload_json[0] != '\0') {
         payload = cJSON_Parse(e->payload_json);
     }
 
-    for (size_t i = 0; i < count; i++) {
-        gw_automation_t *a = &autos[i];
-        if (!a->enabled) continue;
-        if (a->json[0] == '\0') continue;
+    event_payload_view_t pv;
+    build_payload_view(payload, &pv);
 
-        cJSON *root = cJSON_Parse(a->json);
-        if (!root) continue;
+    for (size_t i = 0; i < s_rule_count; i++) {
+        const gw_rule_entry_t *re = &s_rules[i];
+        const gw_auto_compiled_t *c = &re->compiled;
+        if (!c || c->hdr.magic != 0x52415747 || c->hdr.version != 2) continue;
+        if (c->hdr.automation_count == 0 || !c->autos) continue;
 
-        cJSON *triggers = cJSON_GetObjectItemCaseSensitive(root, "triggers");
-        cJSON *conditions = cJSON_GetObjectItemCaseSensitive(root, "conditions");
-        cJSON *actions = cJSON_GetObjectItemCaseSensitive(root, "actions");
+        const gw_auto_bin_automation_v2_t *a0 = &c->autos[0];
 
         bool matched = false;
-        if (cJSON_IsArray(triggers)) {
-            cJSON *t = NULL;
-            cJSON_ArrayForEach(t, triggers)
-            {
-                if (trigger_matches(t, e, payload)) {
-                    matched = true;
-                    break;
-                }
+        for (uint32_t ti = 0; ti < a0->triggers_count; ti++) {
+            const uint32_t idx = a0->triggers_index + ti;
+            if (idx >= c->hdr.trigger_count_total) break;
+            if (trigger_matches_compiled(c, &c->triggers[idx], evt_type, e, &pv)) {
+                matched = true;
+                break;
             }
         }
+        if (!matched) continue;
 
-        if (!matched) {
-            cJSON_Delete(root);
+        const gw_auto_bin_condition_v2_t *conds = NULL;
+        if (a0->conditions_count) {
+            if (a0->conditions_index >= c->hdr.condition_count_total) continue;
+            conds = &c->conditions[a0->conditions_index];
+        }
+        if (!conditions_pass_compiled(c, conds, a0->conditions_count)) {
             continue;
         }
 
-        if (!conditions_pass(conditions, e)) {
-            cJSON_Delete(root);
-            continue;
+        publish_rules_fired(e, re->id);
+
+        const gw_auto_bin_action_v2_t *acts = NULL;
+        if (a0->actions_count) {
+            if (a0->actions_index >= c->hdr.action_count_total) continue;
+            acts = &c->actions[a0->actions_index];
         }
 
-        publish_rules_fired(e, a);
-
-        if (cJSON_IsArray(actions)) {
-            size_t action_idx = 0;
-            cJSON *act = NULL;
-            cJSON_ArrayForEach(act, actions)
-            {
-                if (!cJSON_IsObject(act)) {
-                    publish_rules_action(e, a, action_idx, false, "action not object");
-                    break;
-                }
-                char errbuf[96];
-                set_err(errbuf, sizeof(errbuf), NULL);
-                esp_err_t err = gw_action_exec(act, errbuf, sizeof(errbuf));
-                if (err != ESP_OK) {
-                    publish_rules_action(e, a, action_idx, false, (errbuf[0] != '\0') ? errbuf : "exec failed");
-                    break;
-                }
-                publish_rules_action(e, a, action_idx, true, NULL);
-                action_idx++;
+        for (uint32_t ai = 0; ai < a0->actions_count; ai++) {
+            char errbuf[96];
+            set_err(errbuf, sizeof(errbuf), NULL);
+            esp_err_t rc = gw_action_exec_compiled(c, &acts[ai], errbuf, sizeof(errbuf));
+            if (rc != ESP_OK) {
+                publish_rules_action(e, re->id, (size_t)ai, false, (errbuf[0] != '\0') ? errbuf : "exec failed");
+                break;
             }
+            publish_rules_action(e, re->id, (size_t)ai, true, NULL);
         }
-
-        cJSON_Delete(root);
     }
 
-    if (payload) {
-        cJSON_Delete(payload);
-    }
-    free(autos);
+    if (payload) cJSON_Delete(payload);
 }
 
 static void rules_task(void *arg)
@@ -449,8 +646,6 @@ static void rules_event_listener(const gw_event_t *event, void *user_ctx)
     if (!s_inited || !s_q || !event) {
         return;
     }
-
-    // Keep callback fast and non-blocking: best-effort enqueue.
     (void)xQueueSend(s_q, event, 0);
 }
 
@@ -474,12 +669,29 @@ esp_err_t gw_rules_init(void)
 
     esp_err_t err = gw_event_bus_add_listener(rules_event_listener, NULL);
     if (err != ESP_OK) {
-        // Task/queue are still useful, but without listener it won't run.
         ESP_LOGW(TAG, "gw_event_bus_add_listener failed: %s", esp_err_to_name(err));
     }
 
+    // Load enabled rules at startup without allocating N * json_max.
+    {
+        const size_t max_autos = 16;
+        gw_automation_meta_t metas[max_autos];
+        memset(metas, 0, sizeof(metas));
+        size_t n = gw_automation_store_list_meta(metas, max_autos);
+        for (size_t i = 0; i < n; i++) {
+            if (!metas[i].enabled) continue;
+            if (!metas[i].id[0]) continue;
+            char errbuf[96];
+            esp_err_t rc = rules_upsert_id(metas[i].id, true, errbuf, sizeof(errbuf));
+            if (rc != ESP_OK) {
+                ESP_LOGW(TAG, "initial load failed (%s): %s", metas[i].id, errbuf[0] ? errbuf : "err");
+            }
+        }
+        ESP_LOGI(TAG, "loaded compiled rules (count=%u)", (unsigned)s_rule_count);
+    }
+
     s_inited = true;
-    ESP_LOGI(TAG, "rules engine initialized (MVP)");
+    ESP_LOGI(TAG, "rules engine initialized (compiled)");
     return ESP_OK;
 }
 
@@ -489,7 +701,5 @@ esp_err_t gw_rules_handle_event(gw_event_id_t id, const void *data, size_t data_
     if (!s_inited || !s_q || data == NULL || data_size != sizeof(gw_event_t)) {
         return ESP_ERR_INVALID_STATE;
     }
-    // Best-effort enqueue from explicit callers.
     return (xQueueSend(s_q, data, 0) == pdTRUE) ? ESP_OK : ESP_FAIL;
 }
-

@@ -2,34 +2,39 @@
 
 Этот файл — “что делать дальше” в виде последовательного чеклиста.
 
-## MVP-0 (стабилизация текущего состояния)
+Примечание: проект пока non-prod, поэтому совместимость форматов можно ломать (проще пересоздавать конфиги, чем мигрировать).
 
-- [ ] `Wi‑Fi`: добавить fallback для скрытых SSID (если scan не видит, всё равно пробовать подключиться по списку).
-- [ ] `HTTP`: добавить `/health` (например `{ "ok": true, "uptime_ms": ... }`).
-- [ ] `HTTP`: добавить логирование клиента/URI (в debug режиме) для быстрой диагностики “не открывается”.
-- [ ] `Docs`: в `docs/api.md` пометить что `POST /api/devices` временный.
+## Сейчас (стабилизация)
 
-## MVP-1 (реальные Zigbee устройства → реестр → UI)
+- [ ] `HTTP/WS`: устранить причины паник “Stack protection fault” в task `httpd` (обычно: большие stack-alloc буферы/`snprintf` на больших строках, лишние копии JSON).
+- [ ] `Events`: держать payload коротким; большие структуры не логировать целиком в `msg`.
+- [ ] `Docs`: поддерживать `docs/ws-protocol.md` и `docs/architecture.md` в актуальном состоянии.
 
-- [ ] Вынести Zigbee управление в отдельный компонент `components/gw_zigbee/`:
-  - очередь команд,
-  - публикация событий в `gw_core`.
-- [ ] На событиях Zigbee обновлять `gw_device_registry` (uid/name/caps/short_addr/last_seen).
-- [ ] `GET /api/devices` должен отражать реальные Zigbee устройства (не “ручные”).
+## Automations MVP (уже есть, укреплять)
 
-## MVP-2 (управление сетью и устройствами)
+- [x] Хранение автомаций: `/data/autos.bin` (JSON authoring) + `/data/<id>.gwar` (execution).
+- [x] Инвариант: rules engine исполняет только `.gwar` (никакого runtime JSON исполнения).
+- [x] UI редактор автоматизаций + enable/disable.
+- [ ] Нормализованные события: расширить `zigbee.command` (сейчас стабильно только toggle; добавить `on`/`off` где применимо).
+- [ ] State store: поддержать больше ключей из ZCL (см. `docs/zcl-cheatsheet.md`): `current_level`, `onoff`, `battery_pct`, `illuminance_lux`, `occupancy`, ...
+- [ ] Стабильная классификация endpoint’ов (switch/light/sensor) на основе Simple Descriptor + кластеров in/out.
 
-- [ ] `POST /api/network/permit_join` (из `docs/architecture.md`) и кнопка в UI.
-- [ ] `POST /api/devices/{device_uid}/actions/onoff` (on/off/toggle).
+## Automations v2 (следующий большой шаг)
 
-## MVP-3 (события и отладка)
+- [ ] Компиляция actions: добавить group actions (`groups.onoff`, `groups.level`, …).
+- [ ] Компиляция actions: добавить scenes (`scene.store`, `scene.recall`).
+- [ ] Компиляция actions: добавить bind/unbind (`bindings.bind`, `bindings.unbind`).
+- [ ] Triggers: добавить таймеры (`timer.tick`, cron/interval), debounce/throttle (для кнопок/сенсоров).
+- [ ] Conditions: добавить OR/NOT и “группы условий” (простая boolean алгебра).
+- [ ] Mode: добавить `restart`/`queued` (сейчас `single`).
 
-- [ ] SSE `GET /api/events` (хотя бы последние N событий).
-- [ ] Корреляция запрос→результат (`correlation_id`) для действий из UI.
+## Zigbee (углубление по спецификации)
 
-## Позже
+- [ ] Configure Reporting на сенсорах (min/max/reportable_change) — стабильнее state store и условия.
+- [ ] Mgmt_Bind readback (diagnostic): “куда шлёт switch” без гаданий.
+- [ ] “Kick/leave”: повторять leave при `Device_annce`, если прошлый leave не дошёл (device offline / no route).
 
-- [ ] `gw_storage`: NVS/FS для устройств/правил/конфига UI.
+## Позже / интеграции
+
 - [ ] `gw_mqtt`: мост событий наружу (без брокера на устройстве).
-- [ ] Rule engine MVP.
-
+- [ ] Backup/restore (экспорт JSON authoring, без `.gwar` — оно пересобирается на устройстве).

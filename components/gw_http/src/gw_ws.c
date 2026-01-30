@@ -440,7 +440,15 @@ static void ws_handle_req(int fd, cJSON *root)
             ws_send_rsp(fd, id, false, "not found");
             return;
         }
-        gw_event_bus_publish("automation_enabled", "ws", "", 0, cJSON_IsTrue(enabled_j) ? "1" : "0");
+        char msg[96];
+        (void)snprintf(msg, sizeof(msg), "id=%s enabled=%u", id_j->valuestring, cJSON_IsTrue(enabled_j) ? 1U : 0U);
+        char payload[128];
+        (void)snprintf(payload,
+                       sizeof(payload),
+                       "{\"id\":\"%s\",\"enabled\":%s}",
+                       id_j->valuestring,
+                       cJSON_IsTrue(enabled_j) ? "true" : "false");
+        gw_event_bus_publish_ex("automation_enabled", "ws", "", 0, msg, payload);
         ws_send_rsp(fd, id, true, NULL);
         return;
     }

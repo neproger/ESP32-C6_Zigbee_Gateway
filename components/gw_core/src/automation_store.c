@@ -1,9 +1,12 @@
 #include "gw_core/automation_store.h"
 
 #include <stdbool.h>
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "gw_core/automation_compiled.h"
 
 #include "esp_log.h"
 #include "esp_spiffs.h"
@@ -32,6 +35,22 @@ static const char *AUTOS_PATH = "/data/autos.bin";
 static const char *AUTOS_TMP_PATH = "/data/autos.tmp";
 
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
+
+static bool is_safe_id_char(char c)
+{
+    return isalnum((unsigned char)c) || c == '_' || c == '-';
+}
+
+static bool compiled_path_for_id(const char *id, char *out, size_t out_size)
+{
+    if (!id || !id[0] || !out || out_size < 16) return false;
+    for (const char *p = id; *p; p++) {
+        if (!is_safe_id_char(*p)) return false;
+    }
+    // Keep extension distinct so it's easy to recognize on device.
+    int n = snprintf(out, out_size, "/data/%s.gwar", id);
+    return n > 0 && (size_t)n < out_size;
+}
 
 static size_t find_idx_locked(const char *id)
 {
@@ -96,6 +115,80 @@ static esp_err_t save_to_fs(void)
     return ESP_OK;
 }
 
+static esp_err_t write_compiled_for_automation(const gw_automation_t *a)
+{
+    if (!s_fs_inited) return ESP_ERR_INVALID_STATE;
+    if (!a || !a->id[0] || !a->json[0]) return ESP_ERR_INVALID_ARG;
+
+    char path[96];
+    if (!compiled_path_for_id(a->id, path, sizeof(path))) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    gw_auto_compiled_t c = {0};
+    char errbuf[96] = {0};
+    esp_err_t err = gw_auto_compile_json(a->json, &c, errbuf, sizeof(errbuf));
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "compile failed for %s: %s", a->id, errbuf[0] ? errbuf : "err");
+        gw_auto_compiled_free(&c);
+        return err;
+    }
+
+    // Atomic-ish write: write tmp then rename.
+    char tmp_path[110];
+    (void)snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
+    (void)remove(tmp_path);
+    err = gw_auto_compiled_write_file(tmp_path, &c);
+    if (err == ESP_OK) {
+        (void)remove(path);
+        if (rename(tmp_path, path) != 0) {
+            (void)remove(tmp_path);
+            err = ESP_FAIL;
+        }
+    } else {
+        (void)remove(tmp_path);
+    }
+    gw_auto_compiled_free(&c);
+    return err;
+}
+
+static esp_err_t rebuild_compiled_to_fs(void)
+{
+    if (!s_fs_inited) return ESP_ERR_INVALID_STATE;
+
+    // Avoid allocating N * json_max (large). Process one item at a time.
+    gw_automation_t *tmp = (gw_automation_t *)malloc(sizeof(gw_automation_t));
+    if (!tmp) return ESP_ERR_NO_MEM;
+
+    portENTER_CRITICAL(&s_lock);
+    const size_t n = s_store.count;
+    portEXIT_CRITICAL(&s_lock);
+
+    for (size_t i = 0; i < n; i++) {
+        portENTER_CRITICAL(&s_lock);
+        *tmp = s_store.items[i];
+        portEXIT_CRITICAL(&s_lock);
+
+        const gw_automation_t *a = tmp;
+        char path[96];
+        if (!compiled_path_for_id(a->id, path, sizeof(path))) {
+            continue;
+        }
+
+        if (!a->enabled) {
+            (void)remove(path);
+            continue;
+        }
+
+        if (a->json[0]) {
+            (void)write_compiled_for_automation(a);
+        }
+    }
+
+    free(tmp);
+    return ESP_OK;
+}
+
 esp_err_t gw_automation_store_init(void)
 {
     if (s_inited) {
@@ -128,6 +221,11 @@ esp_err_t gw_automation_store_init(void)
         }
     }
 
+    // Ensure compiled cache exists for current store contents (best-effort).
+    if (s_fs_inited) {
+        (void)rebuild_compiled_to_fs();
+    }
+
     s_inited = true;
     return ESP_OK;
 }
@@ -138,6 +236,23 @@ size_t gw_automation_store_list(gw_automation_t *out, size_t max_out)
     portENTER_CRITICAL(&s_lock);
     size_t n = s_store.count < max_out ? s_store.count : max_out;
     memcpy(out, s_store.items, n * sizeof(gw_automation_t));
+    portEXIT_CRITICAL(&s_lock);
+    return n;
+}
+
+size_t gw_automation_store_list_meta(gw_automation_meta_t *out, size_t max_out)
+{
+    if (!s_inited || !out || max_out == 0) return 0;
+    portENTER_CRITICAL(&s_lock);
+    size_t n = s_store.count < max_out ? s_store.count : max_out;
+    for (size_t i = 0; i < n; i++) {
+        const gw_automation_t *a = &s_store.items[i];
+        gw_automation_meta_t *m = &out[i];
+        memset(m, 0, sizeof(*m));
+        strlcpy(m->id, a->id, sizeof(m->id));
+        strlcpy(m->name, a->name, sizeof(m->name));
+        m->enabled = a->enabled;
+    }
     portEXIT_CRITICAL(&s_lock);
     return n;
 }
@@ -165,6 +280,26 @@ esp_err_t gw_automation_store_put(const gw_automation_t *a)
     normalized.name[sizeof(normalized.name) - 1] = '\0';
     normalized.json[sizeof(normalized.json) - 1] = '\0';
 
+    if (!s_fs_inited) {
+        esp_err_t ferr = fs_init_once();
+        if (ferr != ESP_OK) return ferr;
+    }
+
+    // Architecture rule: runtime executes compiled only.
+    // If enabled, compilation must succeed at save time.
+    if (normalized.enabled) {
+        esp_err_t cerr = write_compiled_for_automation(&normalized);
+        if (cerr != ESP_OK) {
+            return cerr;
+        }
+    } else {
+        // If disabled, ensure no stale compiled file remains.
+        char path[96];
+        if (compiled_path_for_id(normalized.id, path, sizeof(path))) {
+            (void)remove(path);
+        }
+    }
+
     portENTER_CRITICAL(&s_lock);
     size_t idx = find_idx_locked(normalized.id);
     if (idx != (size_t)-1) {
@@ -178,12 +313,9 @@ esp_err_t gw_automation_store_put(const gw_automation_t *a)
     }
     portEXIT_CRITICAL(&s_lock);
 
-    if (!s_fs_inited) {
-        esp_err_t err = fs_init_once();
-        if (err != ESP_OK) return err;
-    }
-
-    return save_to_fs();
+    esp_err_t err = save_to_fs();
+    if (err != ESP_OK) return err;
+    return ESP_OK;
 }
 
 esp_err_t gw_automation_store_remove(const char *id)
@@ -207,7 +339,15 @@ esp_err_t gw_automation_store_remove(const char *id)
         esp_err_t err = fs_init_once();
         if (err != ESP_OK) return err;
     }
-    return save_to_fs();
+    esp_err_t err = save_to_fs();
+    if (err != ESP_OK) return err;
+
+    // Remove compiled file for this automation (ignore errors).
+    char path[96];
+    if (compiled_path_for_id(id, path, sizeof(path))) {
+        (void)remove(path);
+    }
+    return ESP_OK;
 }
 
 esp_err_t gw_automation_store_set_enabled(const char *id, bool enabled)
@@ -227,5 +367,21 @@ esp_err_t gw_automation_store_set_enabled(const char *id, bool enabled)
         esp_err_t err = fs_init_once();
         if (err != ESP_OK) return err;
     }
-    return save_to_fs();
+    esp_err_t err = save_to_fs();
+    if (err != ESP_OK) return err;
+
+    // Keep compiled cache consistent without rebuilding everything.
+    if (enabled) {
+        gw_automation_t a = {0};
+        if (gw_automation_store_get(id, &a) == ESP_OK && a.json[0]) {
+            return write_compiled_for_automation(&a);
+        }
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    char path[96];
+    if (compiled_path_for_id(id, path, sizeof(path))) {
+        (void)remove(path);
+    }
+    return ESP_OK;
 }

@@ -11,6 +11,7 @@
 - `docs/troubleshooting.md` — типовые проблемы (Wi‑Fi/HTTP/VS Code/ESP‑IDF окружение).
 - `docs/zigbee-spec-cheatsheet.md` — памятка по ZigBee Spec (ZDP/APS/leave/bind/addressing) для разработки gateway.
 - `docs/zcl-cheatsheet.md` — памятка по ZCL (кластера/команды/атрибуты/единицы) для нормализованных событий и автоматизаций.
+- `docs/zigbee docs/` — исходные PDF спецификации, откуда сделаны памятки.
 
 ## Целевая архитектура (to-be)
 

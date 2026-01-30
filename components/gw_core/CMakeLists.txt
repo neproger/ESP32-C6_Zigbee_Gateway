@@ -3,6 +3,7 @@ idf_component_register(
         "src/event_bus.c"
         "src/device_registry.c"
         "src/automation_store.c"
+        "src/automation_compiled.c"
         "src/zb_model.c"
         "src/zb_classify.c"
         "src/sensor_store.c"

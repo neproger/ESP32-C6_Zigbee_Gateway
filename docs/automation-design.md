@@ -13,6 +13,48 @@
 
 ---
 
+## Важно: `payload.cluster` / `payload.attr` — что это и зачем
+
+Это поля из ZCL‑мира, и они зависят от типа события:
+
+### `zigbee.command`
+Это “пришла ZCL команда” (например On/Off Toggle).
+
+Обычно достаточно:
+- `device_uid` (кто прислал)
+- `payload.endpoint` (с какого endpoint)
+- `payload.cluster` (в каком кластере; например `0x0006`)
+- `payload.cmd` (какая команда; например `toggle`)
+
+`payload.attr` здесь **не обязателен** и в общем случае не имеет смысла: команда ≠ изменение атрибута.
+
+Пример:
+```json
+{ "type":"zigbee.command", "device_uid":"0x...", "payload":{ "endpoint":1, "cluster":"0x0006", "cmd":"toggle" } }
+```
+
+### `zigbee.attr_report`
+Это “пришёл репорт значения атрибута” (Foundation: Report Attributes).
+
+Здесь `payload.attr` как раз критичен:
+- `payload.cluster` (например `0x0402` Temperature Measurement)
+- `payload.attr` (например `0x0000` MeasuredValue)
+- `payload.value` (raw значение, как в Zigbee)
+- `payload.unit` (наша строка для удобства/логов)
+
+Пример:
+```json
+{ "type":"zigbee.attr_report", "device_uid":"0x...", "payload":{ "endpoint":3, "cluster":"0x0402", "attr":"0x0000", "value":2330, "unit":"cC" } }
+```
+
+Таблица “что часто встречается” (см. `docs/zcl-cheatsheet.md`):
+- `0x0006` On/Off: attr `0x0000` OnOff (bool)
+- `0x0008` Level Control: attr `0x0000` CurrentLevel (0..254)
+- `0x0402` Temperature: attr `0x0000` MeasuredValue (int16, 0.01°C)
+- `0x0405` Humidity: attr `0x0000` MeasuredValue (uint16, 0.01%RH)
+
+---
+
 ## 1) Идентификаторы устройств и имена
 
 ### `device_uid`
@@ -192,10 +234,14 @@ MVP ключей (предложение):
 ## 5) Хранение и API
 
 ### Хранение
-Автоматизации храним как JSON (opaque) в NVS (через `gw_automation_store`).
+Автоматизации храним в выделенном SPIFFS-разделе `gw_data`, смонтированном в `/data`:
+- `/data/autos.bin` — список автоматизаций (id/name/enabled/json) для UI/редактирования
+- `/data/<automation_id>.gwar` — compiled бинарник для выполнения (runtime)
 
-Правило совместимости:
-- новый код должен уметь читать старые `v` и мигрировать (или мягко отключать).
+Инвариант архитектуры: rules engine исполняет только `.gwar` (никакого “исполнения JSON” на каждое событие).
+
+Важно: при `automations.put`/enable компиляция должна пройти успешно, иначе сохранение отклоняется
+(чтобы не получалось “в UI сохранилось, но по триггеру не работает”).
 
 ### Управление (предпочтительно через WS)
 См. `docs/ws-protocol.md`:
@@ -211,7 +257,29 @@ MVP ключей (предложение):
 
 ## 6) Что считаем “готовым MVP”
 
-1) Нормализовать минимум событий: `zigbee.command` (toggle/on/off), `zigbee.attr_report` (temp/hum).
+1) Нормализовать минимум событий: `zigbee.command` (toggle; позже on/off), `zigbee.attr_report` (temp/hum).
 2) State store с 2–3 ключами (температура/влажность/last_seen).
 3) Automation engine: `event` trigger + `state` conditions + `zigbee` action.
 4) UI: список автоматизаций, enable/disable, просмотр JSON.
+
+---
+
+## Реальность “as-is”: что компилируется в `.gwar` прямо сейчас
+
+UI хранит/редактирует JSON, но rules engine исполняет только compiled `.gwar`.
+
+### Поддержано (MVP)
+- triggers: `event` с `event_type` одним из: `zigbee.command`, `zigbee.attr_report`, `device.join`, `device.leave`
+- conditions: `state` сравнения (AND по списку)
+- actions (Zigbee primitives, без runtime JSON парсинга):
+  - device on/off: `{ "type":"zigbee", "cmd":"onoff.on|off|toggle", "device_uid":"0x...", "endpoint": 1 }`
+  - device level: `{ "type":"zigbee", "cmd":"level.move_to_level", "device_uid":"0x...", "endpoint": 1, "level": 0..254, "transition_ms": 0..60000 }`
+  - group on/off: `{ "type":"zigbee", "cmd":"onoff.on|off|toggle", "group_id":"0x0003" }`
+  - group level: `{ "type":"zigbee", "cmd":"level.move_to_level", "group_id":"0x0003", "level": 0..254, "transition_ms": 0..60000 }`
+  - scenes: `{ "type":"zigbee", "cmd":"scene.store|scene.recall", "group_id":"0x0003", "scene_id": 1..255 }`
+  - binding: `{ "type":"zigbee", "cmd":"bind|unbind", "src_device_uid":"0x...", "src_endpoint": 1..240, "cluster_id":"0x0006", "dst_device_uid":"0x...", "dst_endpoint": 1..240 }`
+
+### Запланировано (следующий шаг “укрепления”)
+Расширять компиляцию действий (не меняя UI‑JSON формат) на:
+- color control (device/group): `color.move_to_color_xy`, `color.move_to_color_temperature`
+- “management” действия: permit join, leave/kick, mgmt bind table readback (как инструменты админки)

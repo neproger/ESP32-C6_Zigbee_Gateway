@@ -14,7 +14,7 @@
 Состояние репозитория на данный момент:
 
 - Реализовано:
-  - `gw_core`: реестр устройств + persist в NVS, event bus с поддержкой structured payload (JSON) для нормализованных событий.
+  - `gw_core`: реестр устройств (persist в NVS), event bus, state store, automation store (SPIFFS `/data`), rules engine (исполнение из compiled `.gwar`).
   - `gw_zigbee`: менеджер Zigbee (discovery endpoints/clusters, bind/leave/permit_join) + примитивы действий:
     - unicast (device): on/off/toggle, level, color_xy, color_temp
     - groupcast (group): on/off/toggle, level, color_xy, color_temp
@@ -24,9 +24,9 @@
   - Web UI (`web/`) упаковывается в SPIFFS partition `www` и может обновляться отдельно от прошивки.
   - Wi‑Fi STA с попыткой подключения к известным точкам (см. `main/wifi_aps_config.h`), печать IP и ссылки на UI.
 - Не реализовано / в работе:
-  - Исполнение правил (rules engine) и таймеры/cron (пока есть только хранение автоматизаций в NVS и управление через WS).
+  - Таймеры/cron (планировщик; для расписаний и debounce).
   - MQTT client (опционально по архитектуре).
-  - Расширенное хранилище/миграции схем (кроме текущих NVS blobs).
+  - Миграции схем/версий конфигов (пока non-prod: проще пересоздавать).
   - SSE `/api/events` (вместо этого используем WS поток событий).
 
 ### Инварианты слоёв (важно соблюдать)
@@ -120,8 +120,9 @@ flowchart LR
 - Capabilities: какие действия UI и какие нормализации событий возможны для устройства.
 
 Сохранение:
-- NVS key-value для MVP (JSON blob на устройство и на правило).
-- Опционально позже: LittleFS/SPIFFS для больших конфигов и ассетов UI.
+- NVS key-value: устройства (реестр устройств).
+- SPIFFS `www`: ассеты Web UI.
+- SPIFFS `gw_data` (`/data`): автоматизации (см. раздел ниже).
 
 ### 4) Rule Engine (автоматизации)
 
@@ -264,6 +265,33 @@ flowchart LR
 - derive из кластеров/эндпоинтов (автоматически) + возможность ручного override в UI.
 - vendor quirks (драйверы) добавить точечно позже, по мере появления конкретных устройств.
 
+### Автоматизации: хранение и исполнение (устойчивый подход)
+
+Цель: UI должен быть удобным (JSON), но runtime на ESP не должен парсить большие JSON на каждое событие.
+
+**Разделение форматов**
+- **JSON (authoring)**: формат для UI/редактирования. Хранится в `/data/autos.bin` как строка `json` внутри `gw_automation_t`.
+- **Binary compiled (`.gwar`) (execution)**: формат для выполнения. Хранится как `/data/<automation_id>.gwar`.
+
+**Инвариант**: rules engine **исполняет только `.gwar`**. Никакого “исполнения JSON” в runtime.
+
+**Жизненный цикл**
+- `automations.put`:
+  - компиляция JSON → запись `/data/<id>.gwar` (если компиляция не удалась — сохранение отклоняется)
+  - затем сохранение списка в `/data/autos.bin`
+  - событие `automation_saved`
+- `automations.set_enabled`:
+  - enable: компиляция+запись `.gwar`
+  - disable: удаление `.gwar`
+  - событие `automation_enabled` (payload содержит `id` и `enabled`)
+- `automations.remove`:
+  - удаление из `/data/autos.bin` и удаление `.gwar`
+  - событие `automation_removed`
+
+**Отладка**
+- `rules.fired`, `rules.action` — исполнение правил и действий
+- `rules.cache` — обновление/ошибки кеша правил (какое правило, какая операция, причина ошибки)
+
 ### Rule Engine: фильтры и корреляция
 
 - Триггер удобно описывать как фильтр по полям события (включая значения в payload), например:
@@ -312,3 +340,104 @@ flowchart LR
 ## Связанные документы
 
 - Файловая структура: `docs/file-structure.md`
+
+## Zigbee: практичные примитивы из спецификаций (как строить “умный дом” без лишнего велосипеда)
+
+Смысл: Zigbee уже содержит несколько “низкоуровневых строительных блоков”, которые можно использовать как фундамент
+для UI/автоматизаций. Мы стараемся **не дублировать эти механизмы**, а поверх них строить rules engine (условия/AND/OR,
+таймеры, multi-step actions), который в итоге сводит действия к стандартным Zigbee операциям.
+
+Референсы:
+- `docs/zigbee-spec-cheatsheet.md` (ZDP/APS/NWK, addressing, bind/leave/permit_join)
+- `docs/zcl-cheatsheet.md` (ZCL clusters/commands/attrs/units, groups/scenes)
+- PDF: `docs/zigbee docs/docs-05-3474-21-0csg-zigbee-specification.pdf` (Zigbee Spec)
+- PDF: `docs/zigbee docs/07-5123-06-zigbee-cluster-library-specification.pdf` (ZCL)
+
+### 1) Роли устройств и “сонные” end devices
+- ZC (координатор) — формирует сеть/Trust Center; обычно `short_addr=0x0000`.
+- ZR (router) — маршрутизирует, может принимать join (если permit join).
+- ZED (end device) — часто батарейный; может быть sleepy → пропускать часть broadcast/groupcast и не всегда быть “на связи”.
+
+Практика для gateway:
+- “Устройство оффлайн” часто означает не “сломалось”, а “sleepy”.
+- Группы/сцены/биндинги могут работать по‑разному в зависимости от роли и режима сна (см. ниже).
+
+### 2) Адресация на уровне APS: куда реально “уходит” команда
+Ключевая вещь для понимания “кнопка шлёт toggle куда?” — `DstAddrMode` в `APSDE-DATA.request`:
+- `0x00` — dst addr/endpoint не заданы: отправка идёт “через APS binding table” (самый частый случай для switch).
+- `0x01` — group address (groupcast).
+- `0x02` — unicast на `short+endpoint`.
+- `0x03` — unicast на `IEEE+endpoint`.
+
+Практика:
+- Если у switch в логах `DST_ADDR_ENDP_NOT_PRESENT (uses APS binding table)` — он будет отправлять только туда, куда есть binding.
+- Group addressing gateway “увидит” только если сам добавлен в группу/слушает её (или если события адресованы endpoint gateway).
+
+### 3) Binding/Unbinding (ZDO) как “автономные автоматизации Zigbee”
+Binding создаёт прямую связь “источник → цель” по конкретному кластеру (например `0x0006` On/Off):
+- кнопка → лампа (без участия gateway в рантайме)
+- кнопка → gateway endpoint (чтобы gateway ловил команды)
+
+Почему это полезно:
+- минимальная задержка (напрямую по Zigbee)
+- работает даже при перезагрузке gateway
+- снижает нагрузку на правила/HTTP/UI
+
+В нашем gateway:
+- `gw_zigbee` умеет bind/unbind (см. `docs/ws-protocol.md` методы `bindings.*`).
+- авто‑биндинг “switch → gateway” можно держать как опцию для режимов, где gateway должен получать команды.
+
+### 4) Groups (0x0004) и Scenes (0x0005) — встроенные примитивы “комната/пресет”
+Zigbee already has:
+- **Groups** (`0x0004`) — список членов группы на устройствах, и возможность groupcast команды.
+- **Scenes** (`0x0005`) — “preset состояния группы” (store/recall).
+
+Практика:
+- Scene требует Groups server на том же endpoint (в ZCL это явная зависимость).
+- Groupcast может быть ненадёжным для sleepy end devices (зависит от реализации).
+
+В нашем gateway:
+- `gw_zigbee` поддерживает group actions и scenes store/recall.
+- Это хороший “таргет” для автоматизаций: вместо 10 действий на 10 устройств → 1 действие “recall scene”.
+
+### 5) Attribute Reporting (ZCL Foundation) как база для sensor/state
+Сенсоры и “состояние” в Zigbee обычно приходят через:
+- `Configure Reporting` (настройка min/max interval, reportable_change)
+- `Report Attributes` (пуш изменений)
+
+Практика:
+- Для Temperature (`0x0402`) / Humidity (`0x0405`) `MeasuredValue` хранится в сотых долях (0.01°C / 0.01%RH).
+- Команды (toggle/on/off) и атрибуты (OnOff / CurrentLevel) — разные вещи: команда не гарантирует, что устройство репортит новое значение.
+
+В нашем gateway:
+- Нормализованные репорты идут как `zigbee.attr_report`, а значения сохраняются в state store.
+- Условия правил читают только state store (не парсят “сырые” сообщения).
+
+### 6) Leave/kick: как “удалить устройство так, чтобы оно поняло”
+Корректное удаление устройства в Zigbee — это `Mgmt_Leave_req` (ZDP, ClusterID `0x0034`) с IEEE адресом цели.
+
+Практика:
+- Если устройство оффлайн/нет маршрута — leave может не дойти, и оно продолжит пытаться rejoin по старым ключам.
+- В таких кейсах обычно нужен factory reset на самом устройстве (или повтор leave при `Device_annce`).
+
+## Автоматизации: что уже поддерживаем (и что пока не поддерживаем)
+
+Важно: UI работает с JSON, но runtime исполняет **только compiled** `.gwar` файлы.
+
+### Сейчас поддержано в компиляторе/исполнителе (MVP)
+- triggers: `zigbee.command`, `zigbee.attr_report`, `device.join`, `device.leave`
+- trigger.match: `device_uid`, `payload.endpoint`, а также (по типу) `payload.cmd`/`payload.cluster` или `payload.cluster`+`payload.attr`
+- conditions: `state` сравнения (`==, !=, >, <, >=, <=`), AND по списку
+- actions (compiled, Zigbee primitives):
+  - device on/off + level
+  - group on/off + level
+  - scenes store/recall (group-based)
+  - bind/unbind (ZDO)
+
+### Уже есть в `gw_zigbee`, но компилятор пока не умеет “съедать” это из rules
+- groupcast: `groups.color_xy`, `groups.color_temp`
+- color: `devices.color_xy`, `devices.color_temp`
+- цвет: `devices.color_xy`, `devices.color_temp`
+
+Идея следующего шага “укрепления” gateway: расширять compiler/executor так, чтобы правила могли вызывать эти стандартные
+примитивы (groups/scenes/bind) без runtime JSON парсинга.
