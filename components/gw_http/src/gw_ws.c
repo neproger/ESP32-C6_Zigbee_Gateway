@@ -15,6 +15,24 @@
 
 static const char *TAG = "gw_ws";
 
+static bool ws_parse_u16(cJSON *j, uint16_t *out)
+{
+    if (!out) return false;
+    if (cJSON_IsNumber(j) && j->valuedouble >= 0 && j->valuedouble <= 65535) {
+        *out = (uint16_t)j->valuedouble;
+        return true;
+    }
+    if (cJSON_IsString(j) && j->valuestring && j->valuestring[0] != '\0') {
+        char *end = NULL;
+        unsigned long v = strtoul(j->valuestring, &end, 0);
+        if (end && *end == '\0' && v <= 65535UL) {
+            *out = (uint16_t)v;
+            return true;
+        }
+    }
+    return false;
+}
+
 typedef struct {
     int fd;
     bool subscribed_events;
@@ -660,6 +678,228 @@ static void ws_handle_req(int fd, cJSON *root)
         esp_err_t err = gw_zigbee_color_move_to_temp(&uid, endpoint, temp);
         if (err != ESP_OK) {
             ws_send_rsp(fd, id, false, "color temp failed");
+            return;
+        }
+        ws_send_rsp(fd, id, true, NULL);
+        return;
+    }
+
+    if (strcmp(m->valuestring, "groups.onoff") == 0) {
+        cJSON *p = cJSON_GetObjectItemCaseSensitive(root, "p");
+        cJSON *group_id_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "group_id") : NULL;
+        cJSON *cmd_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "cmd") : NULL;
+
+        uint16_t group_id = 0;
+        if (!ws_parse_u16(group_id_j, &group_id) || group_id == 0 || group_id == 0xFFFF) {
+            ws_send_rsp(fd, id, false, "bad group_id");
+            return;
+        }
+        if (!cJSON_IsString(cmd_j) || !cmd_j->valuestring) {
+            ws_send_rsp(fd, id, false, "missing cmd");
+            return;
+        }
+
+        gw_zigbee_onoff_cmd_t cmd;
+        if (strcmp(cmd_j->valuestring, "off") == 0) cmd = GW_ZIGBEE_ONOFF_CMD_OFF;
+        else if (strcmp(cmd_j->valuestring, "on") == 0) cmd = GW_ZIGBEE_ONOFF_CMD_ON;
+        else if (strcmp(cmd_j->valuestring, "toggle") == 0) cmd = GW_ZIGBEE_ONOFF_CMD_TOGGLE;
+        else {
+            ws_send_rsp(fd, id, false, "bad cmd");
+            return;
+        }
+
+        esp_err_t err = gw_zigbee_group_onoff_cmd(group_id, cmd);
+        if (err != ESP_OK) {
+            ws_send_rsp(fd, id, false, "group onoff failed");
+            return;
+        }
+        ws_send_rsp(fd, id, true, NULL);
+        return;
+    }
+
+    if (strcmp(m->valuestring, "groups.level") == 0) {
+        cJSON *p = cJSON_GetObjectItemCaseSensitive(root, "p");
+        cJSON *group_id_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "group_id") : NULL;
+        cJSON *level_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "level") : NULL;
+        cJSON *transition_ms_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "transition_ms") : NULL;
+
+        uint16_t group_id = 0;
+        if (!ws_parse_u16(group_id_j, &group_id) || group_id == 0 || group_id == 0xFFFF) {
+            ws_send_rsp(fd, id, false, "bad group_id");
+            return;
+        }
+        if (!cJSON_IsNumber(level_j) || level_j->valuedouble < 0 || level_j->valuedouble > 254) {
+            ws_send_rsp(fd, id, false, "bad level");
+            return;
+        }
+        uint16_t transition_ms = 0;
+        if (cJSON_IsNumber(transition_ms_j) && transition_ms_j->valuedouble >= 0 && transition_ms_j->valuedouble <= 60000) {
+            transition_ms = (uint16_t)transition_ms_j->valuedouble;
+        }
+
+        gw_zigbee_level_t level = {.level = (uint8_t)level_j->valuedouble, .transition_ms = transition_ms};
+        esp_err_t err = gw_zigbee_group_level_move_to_level(group_id, level);
+        if (err != ESP_OK) {
+            ws_send_rsp(fd, id, false, "group level failed");
+            return;
+        }
+        ws_send_rsp(fd, id, true, NULL);
+        return;
+    }
+
+    if (strcmp(m->valuestring, "groups.color_xy") == 0) {
+        cJSON *p = cJSON_GetObjectItemCaseSensitive(root, "p");
+        cJSON *group_id_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "group_id") : NULL;
+        cJSON *x_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "x") : NULL;
+        cJSON *y_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "y") : NULL;
+        cJSON *transition_ms_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "transition_ms") : NULL;
+
+        uint16_t group_id = 0;
+        if (!ws_parse_u16(group_id_j, &group_id) || group_id == 0 || group_id == 0xFFFF) {
+            ws_send_rsp(fd, id, false, "bad group_id");
+            return;
+        }
+        if (!cJSON_IsNumber(x_j) || x_j->valuedouble < 0 || x_j->valuedouble > 65535) {
+            ws_send_rsp(fd, id, false, "bad x");
+            return;
+        }
+        if (!cJSON_IsNumber(y_j) || y_j->valuedouble < 0 || y_j->valuedouble > 65535) {
+            ws_send_rsp(fd, id, false, "bad y");
+            return;
+        }
+        uint16_t transition_ms = 0;
+        if (cJSON_IsNumber(transition_ms_j) && transition_ms_j->valuedouble >= 0 && transition_ms_j->valuedouble <= 60000) {
+            transition_ms = (uint16_t)transition_ms_j->valuedouble;
+        }
+
+        gw_zigbee_color_xy_t color = {.x = (uint16_t)x_j->valuedouble, .y = (uint16_t)y_j->valuedouble, .transition_ms = transition_ms};
+        esp_err_t err = gw_zigbee_group_color_move_to_xy(group_id, color);
+        if (err != ESP_OK) {
+            ws_send_rsp(fd, id, false, "group color failed");
+            return;
+        }
+        ws_send_rsp(fd, id, true, NULL);
+        return;
+    }
+
+    if (strcmp(m->valuestring, "groups.color_temp") == 0) {
+        cJSON *p = cJSON_GetObjectItemCaseSensitive(root, "p");
+        cJSON *group_id_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "group_id") : NULL;
+        cJSON *mireds_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "mireds") : NULL;
+        cJSON *transition_ms_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "transition_ms") : NULL;
+
+        uint16_t group_id = 0;
+        if (!ws_parse_u16(group_id_j, &group_id) || group_id == 0 || group_id == 0xFFFF) {
+            ws_send_rsp(fd, id, false, "bad group_id");
+            return;
+        }
+        if (!cJSON_IsNumber(mireds_j) || mireds_j->valuedouble < 1 || mireds_j->valuedouble > 1000) {
+            ws_send_rsp(fd, id, false, "bad mireds");
+            return;
+        }
+        uint16_t transition_ms = 0;
+        if (cJSON_IsNumber(transition_ms_j) && transition_ms_j->valuedouble >= 0 && transition_ms_j->valuedouble <= 60000) {
+            transition_ms = (uint16_t)transition_ms_j->valuedouble;
+        }
+
+        gw_zigbee_color_temp_t temp = {.mireds = (uint16_t)mireds_j->valuedouble, .transition_ms = transition_ms};
+        esp_err_t err = gw_zigbee_group_color_move_to_temp(group_id, temp);
+        if (err != ESP_OK) {
+            ws_send_rsp(fd, id, false, "group color temp failed");
+            return;
+        }
+        ws_send_rsp(fd, id, true, NULL);
+        return;
+    }
+
+    if (strcmp(m->valuestring, "scenes.store") == 0) {
+        cJSON *p = cJSON_GetObjectItemCaseSensitive(root, "p");
+        cJSON *group_id_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "group_id") : NULL;
+        cJSON *scene_id_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "scene_id") : NULL;
+
+        uint16_t group_id = 0;
+        if (!ws_parse_u16(group_id_j, &group_id) || group_id == 0 || group_id == 0xFFFF) {
+            ws_send_rsp(fd, id, false, "bad group_id");
+            return;
+        }
+        if (!cJSON_IsNumber(scene_id_j) || scene_id_j->valuedouble < 1 || scene_id_j->valuedouble > 255) {
+            ws_send_rsp(fd, id, false, "bad scene_id");
+            return;
+        }
+
+        esp_err_t err = gw_zigbee_scene_store(group_id, (uint8_t)scene_id_j->valuedouble);
+        if (err != ESP_OK) {
+            ws_send_rsp(fd, id, false, "scene store failed");
+            return;
+        }
+        ws_send_rsp(fd, id, true, NULL);
+        return;
+    }
+
+    if (strcmp(m->valuestring, "scenes.recall") == 0) {
+        cJSON *p = cJSON_GetObjectItemCaseSensitive(root, "p");
+        cJSON *group_id_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "group_id") : NULL;
+        cJSON *scene_id_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "scene_id") : NULL;
+
+        uint16_t group_id = 0;
+        if (!ws_parse_u16(group_id_j, &group_id) || group_id == 0 || group_id == 0xFFFF) {
+            ws_send_rsp(fd, id, false, "bad group_id");
+            return;
+        }
+        if (!cJSON_IsNumber(scene_id_j) || scene_id_j->valuedouble < 1 || scene_id_j->valuedouble > 255) {
+            ws_send_rsp(fd, id, false, "bad scene_id");
+            return;
+        }
+
+        esp_err_t err = gw_zigbee_scene_recall(group_id, (uint8_t)scene_id_j->valuedouble);
+        if (err != ESP_OK) {
+            ws_send_rsp(fd, id, false, "scene recall failed");
+            return;
+        }
+        ws_send_rsp(fd, id, true, NULL);
+        return;
+    }
+
+    if (strcmp(m->valuestring, "bindings.bind") == 0 || strcmp(m->valuestring, "bindings.unbind") == 0) {
+        const bool unbind = (strcmp(m->valuestring, "bindings.unbind") == 0);
+        cJSON *p = cJSON_GetObjectItemCaseSensitive(root, "p");
+        cJSON *src_uid_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "src_uid") : NULL;
+        cJSON *src_ep_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "src_endpoint") : NULL;
+        cJSON *cluster_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "cluster_id") : NULL;
+        cJSON *dst_uid_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "dst_uid") : NULL;
+        cJSON *dst_ep_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "dst_endpoint") : NULL;
+
+        if (!cJSON_IsString(src_uid_j) || !src_uid_j->valuestring || src_uid_j->valuestring[0] == '\0') {
+            ws_send_rsp(fd, id, false, "missing src_uid");
+            return;
+        }
+        if (!cJSON_IsString(dst_uid_j) || !dst_uid_j->valuestring || dst_uid_j->valuestring[0] == '\0') {
+            ws_send_rsp(fd, id, false, "missing dst_uid");
+            return;
+        }
+        if (!cJSON_IsNumber(src_ep_j) || src_ep_j->valuedouble < 1 || src_ep_j->valuedouble > 240) {
+            ws_send_rsp(fd, id, false, "bad src_endpoint");
+            return;
+        }
+        if (!cJSON_IsNumber(dst_ep_j) || dst_ep_j->valuedouble < 1 || dst_ep_j->valuedouble > 240) {
+            ws_send_rsp(fd, id, false, "bad dst_endpoint");
+            return;
+        }
+        uint16_t cluster_id = 0;
+        if (!ws_parse_u16(cluster_j, &cluster_id) || cluster_id == 0) {
+            ws_send_rsp(fd, id, false, "bad cluster_id");
+            return;
+        }
+
+        gw_device_uid_t src_uid = {0};
+        gw_device_uid_t dst_uid = {0};
+        strlcpy(src_uid.uid, src_uid_j->valuestring, sizeof(src_uid.uid));
+        strlcpy(dst_uid.uid, dst_uid_j->valuestring, sizeof(dst_uid.uid));
+
+        esp_err_t err = unbind ? gw_zigbee_unbind(&src_uid, (uint8_t)src_ep_j->valuedouble, cluster_id, &dst_uid, (uint8_t)dst_ep_j->valuedouble)
+                               : gw_zigbee_bind(&src_uid, (uint8_t)src_ep_j->valuedouble, cluster_id, &dst_uid, (uint8_t)dst_ep_j->valuedouble);
+        if (err != ESP_OK) {
+            ws_send_rsp(fd, id, false, unbind ? "unbind failed" : "bind failed");
             return;
         }
         ws_send_rsp(fd, id, true, NULL);

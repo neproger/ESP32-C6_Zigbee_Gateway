@@ -49,6 +49,14 @@ Supported methods:
 - `devices.level` (`uid` string, `endpoint` number, `level` 0..254, optional `transition_ms` 0..60000)
 - `devices.color_xy` (`uid` string, `endpoint` number, `x` 0..65535, `y` 0..65535, optional `transition_ms` 0..60000)
 - `devices.color_temp` (`uid` string, `endpoint` number, `mireds` 1..1000, optional `transition_ms` 0..60000)
+- `groups.onoff` (`group_id` number or `"0x...."`, `cmd` one of `"on"|"off"|"toggle"`)
+- `groups.level` (`group_id` number or `"0x...."`, `level` 0..254, optional `transition_ms` 0..60000)
+- `groups.color_xy` (`group_id` number or `"0x...."`, `x` 0..65535, `y` 0..65535, optional `transition_ms` 0..60000)
+- `groups.color_temp` (`group_id` number or `"0x...."`, `mireds` 1..1000, optional `transition_ms` 0..60000)
+- `scenes.store` (`group_id` number or `"0x...."`, `scene_id` 1..255)
+- `scenes.recall` (`group_id` number or `"0x...."`, `scene_id` 1..255)
+- `bindings.bind` (`src_uid` string, `src_endpoint` 1..240, `cluster_id` number or `"0x...."`, `dst_uid` string, `dst_endpoint` 1..240)
+- `bindings.unbind` (same params as `bindings.bind`)
 
 ### `ping`
 

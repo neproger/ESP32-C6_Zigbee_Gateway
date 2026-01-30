@@ -77,6 +77,10 @@ typedef struct {
     gw_device_uid_t uid;
     uint16_t short_addr;
     uint8_t src_ep;
+    uint16_t cluster_id;
+    uint8_t dst_ep;
+    bool unbind;
+    char dst_uid[GW_DEVICE_UID_STRLEN];
 } gw_zb_bind_ctx_t;
 
 static void bind_resp_cb(esp_zb_zdp_status_t zdo_status, void *user_ctx)
@@ -87,8 +91,16 @@ static void bind_resp_cb(esp_zb_zdp_status_t zdo_status, void *user_ctx)
     }
 
     char msg[64];
-    (void)snprintf(msg, sizeof(msg), "status=0x%02x src_ep=%u", (unsigned)zdo_status, (unsigned)ctx->src_ep);
-    gw_event_bus_publish((zdo_status == ESP_ZB_ZDP_STATUS_SUCCESS) ? "zigbee_bind_ok" : "zigbee_bind_failed",
+    (void)snprintf(msg,
+                   sizeof(msg),
+                   "status=0x%02x %s cluster=0x%04x src_ep=%u dst_ep=%u",
+                   (unsigned)zdo_status,
+                   ctx->unbind ? "unbind" : "bind",
+                   (unsigned)ctx->cluster_id,
+                   (unsigned)ctx->src_ep,
+                   (unsigned)ctx->dst_ep);
+    gw_event_bus_publish((zdo_status == ESP_ZB_ZDP_STATUS_SUCCESS) ? (ctx->unbind ? "zigbee_unbind_ok" : "zigbee_bind_ok")
+                                                                 : (ctx->unbind ? "zigbee_unbind_failed" : "zigbee_bind_failed"),
                          "zigbee",
                          ctx->uid.uid,
                          ctx->short_addr,
@@ -312,6 +324,10 @@ static void simple_desc_cb(esp_zb_zdp_status_t zdo_status, esp_zb_af_simple_desc
             strlcpy(bctx->uid.uid, uid, sizeof(bctx->uid.uid));
             bctx->short_addr = ctx->short_addr;
             bctx->src_ep = simple_desc->endpoint;
+            bctx->cluster_id = ESP_ZB_ZCL_CLUSTER_ID_ON_OFF;
+            bctx->dst_ep = GW_ZIGBEE_GATEWAY_ENDPOINT;
+            bctx->unbind = false;
+            bctx->dst_uid[0] = '\0';
 
             esp_zb_zdo_bind_req_param_t bind = {0};
             memcpy(bind.src_address, ctx->ieee, sizeof(bind.src_address));
@@ -698,12 +714,15 @@ static void permit_join_cb(uint8_t seconds)
 typedef struct {
     uint8_t endpoint;
     uint16_t short_addr;
+    uint8_t address_mode;
     gw_device_uid_t uid;
     enum {
         GW_ZB_ACTION_ONOFF = 1,
         GW_ZB_ACTION_LEVEL_MOVE_TO_LEVEL = 2,
         GW_ZB_ACTION_COLOR_MOVE_TO_XY = 3,
         GW_ZB_ACTION_COLOR_MOVE_TO_TEMP = 4,
+        GW_ZB_ACTION_SCENE_STORE = 5,
+        GW_ZB_ACTION_SCENE_RECALL = 6,
     } type;
     union {
         struct {
@@ -722,6 +741,10 @@ typedef struct {
             uint16_t mireds;
             uint16_t transition_ds;
         } color_temp;
+        struct {
+            uint16_t group_id;
+            uint8_t scene_id;
+        } scene;
     } u;
 } gw_zb_action_ctx_t;
 
@@ -775,7 +798,7 @@ static void action_send_cb(uint8_t token)
         cmd.zcl_basic_cmd.dst_addr_u.addr_short = ctx->short_addr;
         cmd.zcl_basic_cmd.dst_endpoint = ctx->endpoint;
         cmd.zcl_basic_cmd.src_endpoint = GW_ZIGBEE_GATEWAY_ENDPOINT;
-        cmd.address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT;
+        cmd.address_mode = ctx->address_mode;
         cmd.on_off_cmd_id = cmd_id;
 
         tsn = esp_zb_zcl_on_off_cmd_req(&cmd);
@@ -792,7 +815,7 @@ static void action_send_cb(uint8_t token)
         cmd.zcl_basic_cmd.dst_addr_u.addr_short = ctx->short_addr;
         cmd.zcl_basic_cmd.dst_endpoint = ctx->endpoint;
         cmd.zcl_basic_cmd.src_endpoint = GW_ZIGBEE_GATEWAY_ENDPOINT;
-        cmd.address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT;
+        cmd.address_mode = ctx->address_mode;
         cmd.level = ctx->u.level.level;
         cmd.transition_time = ctx->u.level.transition_ds;
 
@@ -811,7 +834,7 @@ static void action_send_cb(uint8_t token)
         cmd.zcl_basic_cmd.dst_addr_u.addr_short = ctx->short_addr;
         cmd.zcl_basic_cmd.dst_endpoint = ctx->endpoint;
         cmd.zcl_basic_cmd.src_endpoint = GW_ZIGBEE_GATEWAY_ENDPOINT;
-        cmd.address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT;
+        cmd.address_mode = ctx->address_mode;
         cmd.color_x = ctx->u.color_xy.x;
         cmd.color_y = ctx->u.color_xy.y;
         cmd.transition_time = ctx->u.color_xy.transition_ds;
@@ -832,7 +855,7 @@ static void action_send_cb(uint8_t token)
         cmd.zcl_basic_cmd.dst_addr_u.addr_short = ctx->short_addr;
         cmd.zcl_basic_cmd.dst_endpoint = ctx->endpoint;
         cmd.zcl_basic_cmd.src_endpoint = GW_ZIGBEE_GATEWAY_ENDPOINT;
-        cmd.address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT;
+        cmd.address_mode = ctx->address_mode;
         cmd.color_temperature = ctx->u.color_temp.mireds;
         cmd.transition_time = ctx->u.color_temp.transition_ds;
 
@@ -846,6 +869,44 @@ static void action_send_cb(uint8_t token)
                        (unsigned)ctx->endpoint,
                        (unsigned)ctx->u.color_temp.mireds,
                        (unsigned)ctx->u.color_temp.transition_ds);
+    } else if (ctx->type == GW_ZB_ACTION_SCENE_STORE) {
+        esp_zb_zcl_scenes_store_scene_cmd_t cmd = {0};
+        cmd.zcl_basic_cmd.dst_addr_u.addr_short = ctx->short_addr;
+        cmd.zcl_basic_cmd.dst_endpoint = ctx->endpoint;
+        cmd.zcl_basic_cmd.src_endpoint = GW_ZIGBEE_GATEWAY_ENDPOINT;
+        cmd.address_mode = ctx->address_mode;
+        cmd.group_id = ctx->u.scene.group_id;
+        cmd.scene_id = ctx->u.scene.scene_id;
+
+        tsn = esp_zb_zcl_scenes_store_scene_cmd_req(&cmd);
+
+        (void)snprintf(payload,
+                       sizeof(payload),
+                       "{\"token\":%u,\"tsn\":%u,\"cmd\":\"scene.store\",\"endpoint\":%u,\"cluster\":\"0x0005\",\"group_id\":\"0x%04x\",\"scene_id\":%u}",
+                       (unsigned)token,
+                       (unsigned)tsn,
+                       (unsigned)ctx->endpoint,
+                       (unsigned)ctx->u.scene.group_id,
+                       (unsigned)ctx->u.scene.scene_id);
+    } else if (ctx->type == GW_ZB_ACTION_SCENE_RECALL) {
+        esp_zb_zcl_scenes_recall_scene_cmd_t cmd = {0};
+        cmd.zcl_basic_cmd.dst_addr_u.addr_short = ctx->short_addr;
+        cmd.zcl_basic_cmd.dst_endpoint = ctx->endpoint;
+        cmd.zcl_basic_cmd.src_endpoint = GW_ZIGBEE_GATEWAY_ENDPOINT;
+        cmd.address_mode = ctx->address_mode;
+        cmd.group_id = ctx->u.scene.group_id;
+        cmd.scene_id = ctx->u.scene.scene_id;
+
+        tsn = esp_zb_zcl_scenes_recall_scene_cmd_req(&cmd);
+
+        (void)snprintf(payload,
+                       sizeof(payload),
+                       "{\"token\":%u,\"tsn\":%u,\"cmd\":\"scene.recall\",\"endpoint\":%u,\"cluster\":\"0x0005\",\"group_id\":\"0x%04x\",\"scene_id\":%u}",
+                       (unsigned)token,
+                       (unsigned)tsn,
+                       (unsigned)ctx->endpoint,
+                       (unsigned)ctx->u.scene.group_id,
+                       (unsigned)ctx->u.scene.scene_id);
     } else {
         (void)snprintf(payload, sizeof(payload), "{\"token\":%u,\"tsn\":0,\"cmd\":\"unknown\"}", (unsigned)token);
     }
@@ -887,6 +948,7 @@ esp_err_t gw_zigbee_onoff_cmd(const gw_device_uid_t *uid, uint8_t endpoint, gw_z
     }
     ctx->endpoint = endpoint;
     ctx->short_addr = d.short_addr;
+    ctx->address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT;
     ctx->uid = *uid;
     ctx->type = GW_ZB_ACTION_ONOFF;
     ctx->u.onoff.cmd = cmd;
@@ -945,6 +1007,7 @@ esp_err_t gw_zigbee_level_move_to_level(const gw_device_uid_t *uid, uint8_t endp
     }
     ctx->endpoint = endpoint;
     ctx->short_addr = d.short_addr;
+    ctx->address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT;
     ctx->uid = *uid;
     ctx->type = GW_ZB_ACTION_LEVEL_MOVE_TO_LEVEL;
     ctx->u.level.level = level.level;
@@ -1000,6 +1063,7 @@ esp_err_t gw_zigbee_color_move_to_xy(const gw_device_uid_t *uid, uint8_t endpoin
     }
     ctx->endpoint = endpoint;
     ctx->short_addr = d.short_addr;
+    ctx->address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT;
     ctx->uid = *uid;
     ctx->type = GW_ZB_ACTION_COLOR_MOVE_TO_XY;
     ctx->u.color_xy.x = color.x;
@@ -1057,6 +1121,7 @@ esp_err_t gw_zigbee_color_move_to_temp(const gw_device_uid_t *uid, uint8_t endpo
     }
     ctx->endpoint = endpoint;
     ctx->short_addr = d.short_addr;
+    ctx->address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT;
     ctx->uid = *uid;
     ctx->type = GW_ZB_ACTION_COLOR_MOVE_TO_TEMP;
     ctx->u.color_temp.mireds = temp.mireds;
@@ -1089,4 +1154,365 @@ esp_err_t gw_zigbee_color_move_to_temp(const gw_device_uid_t *uid, uint8_t endpo
 
     esp_zb_scheduler_alarm(action_send_cb, token, 0);
     return ESP_OK;
+}
+
+static esp_err_t schedule_group_action(uint16_t group_id, gw_zb_action_ctx_t *ctx)
+{
+    if (group_id == 0 || group_id == 0xFFFF || ctx == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ctx->short_addr = group_id;
+    ctx->endpoint = 0xFF;
+    ctx->address_mode = ESP_ZB_APS_ADDR_MODE_16_GROUP_ENDP_NOT_PRESENT;
+    ctx->uid.uid[0] = '\0';
+
+    uint8_t token = 0;
+    portENTER_CRITICAL(&s_action_lock);
+    s_action_token++;
+    if (s_action_token == 0) s_action_token++;
+    token = s_action_token;
+    if (s_action_ctx_by_token[token] != NULL) {
+        portEXIT_CRITICAL(&s_action_lock);
+        return ESP_FAIL;
+    }
+    s_action_ctx_by_token[token] = ctx;
+    portEXIT_CRITICAL(&s_action_lock);
+
+    esp_zb_scheduler_alarm(action_send_cb, token, 0);
+    return ESP_OK;
+}
+
+esp_err_t gw_zigbee_group_onoff_cmd(uint16_t group_id, gw_zigbee_onoff_cmd_t cmd)
+{
+    gw_zb_action_ctx_t *ctx = (gw_zb_action_ctx_t *)calloc(1, sizeof(*ctx));
+    if (!ctx) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    ctx->type = GW_ZB_ACTION_ONOFF;
+    ctx->u.onoff.cmd = cmd;
+
+    char payload[192];
+    (void)snprintf(payload,
+                   sizeof(payload),
+                   "{\"dst_mode\":\"group\",\"group_id\":\"0x%04x\",\"cmd\":\"%s\",\"cluster\":\"0x0006\"}",
+                   (unsigned)group_id,
+                   (cmd == GW_ZIGBEE_ONOFF_CMD_OFF) ? "off" : (cmd == GW_ZIGBEE_ONOFF_CMD_ON) ? "on" : "toggle");
+    gw_event_bus_publish_ex("zigbee.cmd", "zigbee", "", group_id, "", payload);
+
+    esp_err_t err = schedule_group_action(group_id, ctx);
+    if (err != ESP_OK) {
+        free(ctx);
+    }
+    return err;
+}
+
+esp_err_t gw_zigbee_group_level_move_to_level(uint16_t group_id, gw_zigbee_level_t level)
+{
+    if (level.level > 254) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    gw_zb_action_ctx_t *ctx = (gw_zb_action_ctx_t *)calloc(1, sizeof(*ctx));
+    if (!ctx) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    ctx->type = GW_ZB_ACTION_LEVEL_MOVE_TO_LEVEL;
+    ctx->u.level.level = level.level;
+    ctx->u.level.transition_ds = transition_ms_to_ds(level.transition_ms);
+
+    char payload[224];
+    (void)snprintf(payload,
+                   sizeof(payload),
+                   "{\"dst_mode\":\"group\",\"group_id\":\"0x%04x\",\"cmd\":\"move_to_level\",\"cluster\":\"0x0008\",\"level\":%u,\"transition_ds\":%u}",
+                   (unsigned)group_id,
+                   (unsigned)ctx->u.level.level,
+                   (unsigned)ctx->u.level.transition_ds);
+    gw_event_bus_publish_ex("zigbee.cmd", "zigbee", "", group_id, "", payload);
+
+    esp_err_t err = schedule_group_action(group_id, ctx);
+    if (err != ESP_OK) {
+        free(ctx);
+    }
+    return err;
+}
+
+esp_err_t gw_zigbee_group_color_move_to_xy(uint16_t group_id, gw_zigbee_color_xy_t color)
+{
+    gw_zb_action_ctx_t *ctx = (gw_zb_action_ctx_t *)calloc(1, sizeof(*ctx));
+    if (!ctx) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    ctx->type = GW_ZB_ACTION_COLOR_MOVE_TO_XY;
+    ctx->u.color_xy.x = color.x;
+    ctx->u.color_xy.y = color.y;
+    ctx->u.color_xy.transition_ds = transition_ms_to_ds(color.transition_ms);
+
+    char payload[240];
+    (void)snprintf(payload,
+                   sizeof(payload),
+                   "{\"dst_mode\":\"group\",\"group_id\":\"0x%04x\",\"cmd\":\"move_to_color_xy\",\"cluster\":\"0x0300\",\"x\":%u,\"y\":%u,\"transition_ds\":%u}",
+                   (unsigned)group_id,
+                   (unsigned)ctx->u.color_xy.x,
+                   (unsigned)ctx->u.color_xy.y,
+                   (unsigned)ctx->u.color_xy.transition_ds);
+    gw_event_bus_publish_ex("zigbee.cmd", "zigbee", "", group_id, "", payload);
+
+    esp_err_t err = schedule_group_action(group_id, ctx);
+    if (err != ESP_OK) {
+        free(ctx);
+    }
+    return err;
+}
+
+esp_err_t gw_zigbee_group_color_move_to_temp(uint16_t group_id, gw_zigbee_color_temp_t temp)
+{
+    gw_zb_action_ctx_t *ctx = (gw_zb_action_ctx_t *)calloc(1, sizeof(*ctx));
+    if (!ctx) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    ctx->type = GW_ZB_ACTION_COLOR_MOVE_TO_TEMP;
+    ctx->u.color_temp.mireds = temp.mireds;
+    ctx->u.color_temp.transition_ds = transition_ms_to_ds(temp.transition_ms);
+
+    char payload[240];
+    (void)snprintf(payload,
+                   sizeof(payload),
+                   "{\"dst_mode\":\"group\",\"group_id\":\"0x%04x\",\"cmd\":\"move_to_color_temperature\",\"cluster\":\"0x0300\",\"mireds\":%u,\"transition_ds\":%u}",
+                   (unsigned)group_id,
+                   (unsigned)ctx->u.color_temp.mireds,
+                   (unsigned)ctx->u.color_temp.transition_ds);
+    gw_event_bus_publish_ex("zigbee.cmd", "zigbee", "", group_id, "", payload);
+
+    esp_err_t err = schedule_group_action(group_id, ctx);
+    if (err != ESP_OK) {
+        free(ctx);
+    }
+    return err;
+}
+
+esp_err_t gw_zigbee_scene_store(uint16_t group_id, uint8_t scene_id)
+{
+    if (group_id == 0 || group_id == 0xFFFF || scene_id == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    gw_zb_action_ctx_t *ctx = (gw_zb_action_ctx_t *)calloc(1, sizeof(*ctx));
+    if (!ctx) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    ctx->type = GW_ZB_ACTION_SCENE_STORE;
+    ctx->u.scene.group_id = group_id;
+    ctx->u.scene.scene_id = scene_id;
+
+    char payload[200];
+    (void)snprintf(payload,
+                   sizeof(payload),
+                   "{\"dst_mode\":\"group\",\"group_id\":\"0x%04x\",\"cmd\":\"scene.store\",\"cluster\":\"0x0005\",\"scene_id\":%u}",
+                   (unsigned)group_id,
+                   (unsigned)scene_id);
+    gw_event_bus_publish_ex("zigbee.cmd", "zigbee", "", group_id, "", payload);
+
+    esp_err_t err = schedule_group_action(group_id, ctx);
+    if (err != ESP_OK) {
+        free(ctx);
+    }
+    return err;
+}
+
+esp_err_t gw_zigbee_scene_recall(uint16_t group_id, uint8_t scene_id)
+{
+    if (group_id == 0 || group_id == 0xFFFF || scene_id == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    gw_zb_action_ctx_t *ctx = (gw_zb_action_ctx_t *)calloc(1, sizeof(*ctx));
+    if (!ctx) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    ctx->type = GW_ZB_ACTION_SCENE_RECALL;
+    ctx->u.scene.group_id = group_id;
+    ctx->u.scene.scene_id = scene_id;
+
+    char payload[200];
+    (void)snprintf(payload,
+                   sizeof(payload),
+                   "{\"dst_mode\":\"group\",\"group_id\":\"0x%04x\",\"cmd\":\"scene.recall\",\"cluster\":\"0x0005\",\"scene_id\":%u}",
+                   (unsigned)group_id,
+                   (unsigned)scene_id);
+    gw_event_bus_publish_ex("zigbee.cmd", "zigbee", "", group_id, "", payload);
+
+    esp_err_t err = schedule_group_action(group_id, ctx);
+    if (err != ESP_OK) {
+        free(ctx);
+    }
+    return err;
+}
+
+typedef struct {
+    bool unbind;
+    gw_device_uid_t src_uid;
+    gw_device_uid_t dst_uid;
+    uint16_t src_short;
+    uint8_t src_ep;
+    uint16_t cluster_id;
+    uint8_t dst_ep;
+    esp_zb_ieee_addr_t src_ieee;
+    esp_zb_ieee_addr_t dst_ieee;
+} gw_zb_bind_req_ctx_t;
+
+static gw_zb_bind_req_ctx_t *s_bind_req_ctx_by_token[256];
+static uint8_t s_bind_req_token;
+static portMUX_TYPE s_bind_req_lock = portMUX_INITIALIZER_UNLOCKED;
+
+static void bind_req_send_cb(uint8_t token)
+{
+    gw_zb_bind_req_ctx_t *ctx = NULL;
+    portENTER_CRITICAL(&s_bind_req_lock);
+    ctx = s_bind_req_ctx_by_token[token];
+    s_bind_req_ctx_by_token[token] = NULL;
+    portEXIT_CRITICAL(&s_bind_req_lock);
+
+    if (!ctx) {
+        return;
+    }
+
+    char msg[160];
+    (void)snprintf(msg,
+                   sizeof(msg),
+                   "%s cluster=0x%04x src_ep=%u -> dst=%s ep=%u",
+                   ctx->unbind ? "unbind" : "bind",
+                   (unsigned)ctx->cluster_id,
+                   (unsigned)ctx->src_ep,
+                   ctx->dst_uid.uid,
+                   (unsigned)ctx->dst_ep);
+    gw_event_bus_publish(ctx->unbind ? "zigbee_unbind_requested" : "zigbee_bind_requested", "zigbee", ctx->src_uid.uid, ctx->src_short, msg);
+
+    gw_zb_bind_ctx_t *bctx = (gw_zb_bind_ctx_t *)calloc(1, sizeof(*bctx));
+    if (!bctx) {
+        gw_event_bus_publish(ctx->unbind ? "zigbee_unbind_failed" : "zigbee_bind_failed", "zigbee", ctx->src_uid.uid, ctx->src_short, "no mem for bind ctx");
+        free(ctx);
+        return;
+    }
+    bctx->uid = ctx->src_uid;
+    bctx->short_addr = ctx->src_short;
+    bctx->src_ep = ctx->src_ep;
+    bctx->cluster_id = ctx->cluster_id;
+    bctx->dst_ep = ctx->dst_ep;
+    bctx->unbind = ctx->unbind;
+    strlcpy(bctx->dst_uid, ctx->dst_uid.uid, sizeof(bctx->dst_uid));
+
+    esp_zb_zdo_bind_req_param_t bind = {0};
+    memcpy(bind.src_address, ctx->src_ieee, sizeof(bind.src_address));
+    bind.src_endp = ctx->src_ep;
+    bind.cluster_id = ctx->cluster_id;
+    bind.dst_addr_mode = ESP_ZB_ZDO_BIND_DST_ADDR_MODE_64_BIT_EXTENDED;
+    memcpy(bind.dst_address_u.addr_long, ctx->dst_ieee, sizeof(bind.dst_address_u.addr_long));
+    bind.dst_endp = ctx->dst_ep;
+    bind.req_dst_addr = ctx->src_short;
+
+    if (ctx->unbind) {
+        esp_zb_zdo_device_unbind_req(&bind, bind_resp_cb, bctx);
+    } else {
+        esp_zb_zdo_device_bind_req(&bind, bind_resp_cb, bctx);
+    }
+
+    free(ctx);
+}
+
+static esp_err_t schedule_bind_req(const gw_zb_bind_req_ctx_t *in)
+{
+    if (!in) return ESP_ERR_INVALID_ARG;
+
+    gw_zb_bind_req_ctx_t *ctx = (gw_zb_bind_req_ctx_t *)calloc(1, sizeof(*ctx));
+    if (!ctx) {
+        return ESP_ERR_NO_MEM;
+    }
+    *ctx = *in;
+
+    uint8_t token = 0;
+    portENTER_CRITICAL(&s_bind_req_lock);
+    s_bind_req_token++;
+    if (s_bind_req_token == 0) s_bind_req_token++;
+    token = s_bind_req_token;
+    if (s_bind_req_ctx_by_token[token] != NULL) {
+        portEXIT_CRITICAL(&s_bind_req_lock);
+        free(ctx);
+        return ESP_FAIL;
+    }
+    s_bind_req_ctx_by_token[token] = ctx;
+    portEXIT_CRITICAL(&s_bind_req_lock);
+
+    esp_zb_scheduler_alarm(bind_req_send_cb, token, 0);
+    return ESP_OK;
+}
+
+esp_err_t gw_zigbee_bind(const gw_device_uid_t *src_uid,
+                         uint8_t src_endpoint,
+                         uint16_t cluster_id,
+                         const gw_device_uid_t *dst_uid,
+                         uint8_t dst_endpoint)
+{
+    if (!src_uid || !dst_uid || src_uid->uid[0] == '\0' || dst_uid->uid[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (src_endpoint == 0 || dst_endpoint == 0 || cluster_id == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    gw_device_t src = {0};
+    if (gw_device_registry_get(src_uid, &src) != ESP_OK || src.short_addr == 0 || src.short_addr == 0xFFFF) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    gw_zb_bind_req_ctx_t ctx = {0};
+    ctx.unbind = false;
+    ctx.src_uid = *src_uid;
+    ctx.dst_uid = *dst_uid;
+    ctx.src_short = src.short_addr;
+    ctx.src_ep = src_endpoint;
+    ctx.cluster_id = cluster_id;
+    ctx.dst_ep = dst_endpoint;
+    if (!uid_str_to_ieee(src_uid->uid, ctx.src_ieee)) return ESP_ERR_INVALID_ARG;
+    if (!uid_str_to_ieee(dst_uid->uid, ctx.dst_ieee)) return ESP_ERR_INVALID_ARG;
+
+    return schedule_bind_req(&ctx);
+}
+
+esp_err_t gw_zigbee_unbind(const gw_device_uid_t *src_uid,
+                           uint8_t src_endpoint,
+                           uint16_t cluster_id,
+                           const gw_device_uid_t *dst_uid,
+                           uint8_t dst_endpoint)
+{
+    if (!src_uid || !dst_uid || src_uid->uid[0] == '\0' || dst_uid->uid[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (src_endpoint == 0 || dst_endpoint == 0 || cluster_id == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    gw_device_t src = {0};
+    if (gw_device_registry_get(src_uid, &src) != ESP_OK || src.short_addr == 0 || src.short_addr == 0xFFFF) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    gw_zb_bind_req_ctx_t ctx = {0};
+    ctx.unbind = true;
+    ctx.src_uid = *src_uid;
+    ctx.dst_uid = *dst_uid;
+    ctx.src_short = src.short_addr;
+    ctx.src_ep = src_endpoint;
+    ctx.cluster_id = cluster_id;
+    ctx.dst_ep = dst_endpoint;
+    if (!uid_str_to_ieee(src_uid->uid, ctx.src_ieee)) return ESP_ERR_INVALID_ARG;
+    if (!uid_str_to_ieee(dst_uid->uid, ctx.dst_ieee)) return ESP_ERR_INVALID_ARG;
+
+    return schedule_bind_req(&ctx);
 }

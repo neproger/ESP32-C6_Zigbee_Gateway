@@ -106,7 +106,7 @@
     { "type": "state", "op": ">", "ref": { "device_uid": "0xBBB...", "key": "temperature_c" }, "value": 10 }
   ],
   "actions": [
-    { "type": "zigbee", "cmd": "on", "device_uid": "0xCCC...", "endpoint": 1, "cluster": "0x0006" }
+    { "type": "zigbee", "cmd": "onoff.on", "device_uid": "0xCCC...", "endpoint": 1 }
   ],
   "mode": "single"
 }
@@ -122,6 +122,55 @@
 - `mode`: как вести себя при частых срабатываниях:
   - `single` — игнорировать новые, пока выполняется текущая,
   - (позже) `restart`, `queued`.
+
+### Actions: Zigbee-примитивы (не изобретаем велосипед)
+Идея: **actions в итоге сводятся к Zigbee Groups/Scenes/Binding или к device unicast-командам**.
+Это даёт максимум совместимости (устройства умеют это нативно), а “умность” (условия/таймеры/AND/OR) остаётся в rules engine.
+
+#### 1) Команды на конкретное устройство (unicast)
+```json
+{ "type": "zigbee", "cmd": "onoff.toggle", "device_uid": "0x00124B0012345678", "endpoint": 1 }
+```
+
+```json
+{ "type": "zigbee", "cmd": "level.move_to_level", "device_uid": "0x00124B0012345678", "endpoint": 1, "level": 254, "transition_ms": 500 }
+```
+
+```json
+{ "type": "zigbee", "cmd": "color.move_to_color_xy", "device_uid": "0x00124B0012345678", "endpoint": 1, "x": 30000, "y": 30000, "transition_ms": 500 }
+```
+
+```json
+{ "type": "zigbee", "cmd": "color.move_to_color_temperature", "device_uid": "0x00124B0012345678", "endpoint": 1, "mireds": 250, "transition_ms": 500 }
+```
+
+#### 2) Команды на группу (groupcast)
+Если нужно управлять “комнатой”/набором устройств — лучше слать в группу (меньше трафика и проще логика).
+```json
+{ "type": "zigbee", "cmd": "onoff.off", "group_id": "0x0003" }
+```
+
+#### 3) Сцены (Scenes cluster)
+Сцена — это “preset” состояния группы. Очень удобно вместо ручного набора из 10 действий.
+```json
+{ "type": "zigbee", "cmd": "scene.store", "group_id": "0x0003", "scene_id": 1 }
+```
+
+```json
+{ "type": "zigbee", "cmd": "scene.recall", "group_id": "0x0003", "scene_id": 1 }
+```
+
+#### 4) Binding / Unbinding (автономный режим)
+Binding создаёт прямую связь (например, кнопка -> лампа или кнопка -> gateway) **без участия gateway в рантайме**.
+Это “автоматизация на стороне Zigbee”, полезно для low-latency и работы при перезагрузке gateway.
+
+```json
+{ "type": "zigbee", "cmd": "bind", "src_device_uid": "0xAAA...", "src_endpoint": 1, "cluster_id": "0x0006", "dst_device_uid": "0xBBB...", "dst_endpoint": 1 }
+```
+
+```json
+{ "type": "zigbee", "cmd": "unbind", "src_device_uid": "0xAAA...", "src_endpoint": 1, "cluster_id": "0x0006", "dst_device_uid": "0xBBB...", "dst_endpoint": 1 }
+```
 
 ---
 

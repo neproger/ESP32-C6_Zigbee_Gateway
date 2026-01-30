@@ -59,6 +59,20 @@ esp_err_t gw_zigbee_color_move_to_xy(const gw_device_uid_t *uid, uint8_t endpoin
 // Send Color Control "move_to_color_temperature" (mireds).
 esp_err_t gw_zigbee_color_move_to_temp(const gw_device_uid_t *uid, uint8_t endpoint, gw_zigbee_color_temp_t temp);
 
+// Groupcast versions (16-bit group address; dst endpoint not present).
+esp_err_t gw_zigbee_group_onoff_cmd(uint16_t group_id, gw_zigbee_onoff_cmd_t cmd);
+esp_err_t gw_zigbee_group_level_move_to_level(uint16_t group_id, gw_zigbee_level_t level);
+esp_err_t gw_zigbee_group_color_move_to_xy(uint16_t group_id, gw_zigbee_color_xy_t color);
+esp_err_t gw_zigbee_group_color_move_to_temp(uint16_t group_id, gw_zigbee_color_temp_t temp);
+
+// Scenes (group-based).
+esp_err_t gw_zigbee_scene_store(uint16_t group_id, uint8_t scene_id);
+esp_err_t gw_zigbee_scene_recall(uint16_t group_id, uint8_t scene_id);
+
+// ZDO binding primitives (bind/unbind src cluster -> dst endpoint).
+esp_err_t gw_zigbee_bind(const gw_device_uid_t *src_uid, uint8_t src_endpoint, uint16_t cluster_id, const gw_device_uid_t *dst_uid, uint8_t dst_endpoint);
+esp_err_t gw_zigbee_unbind(const gw_device_uid_t *src_uid, uint8_t src_endpoint, uint16_t cluster_id, const gw_device_uid_t *dst_uid, uint8_t dst_endpoint);
+
 #ifdef __cplusplus
 }
 #endif
