@@ -278,8 +278,11 @@ UI хранит/редактирует JSON, но rules engine исполняе�
   - group level: `{ "type":"zigbee", "cmd":"level.move_to_level", "group_id":"0x0003", "level": 0..254, "transition_ms": 0..60000 }`
   - scenes: `{ "type":"zigbee", "cmd":"scene.store|scene.recall", "group_id":"0x0003", "scene_id": 1..255 }`
   - binding: `{ "type":"zigbee", "cmd":"bind|unbind", "src_device_uid":"0x...", "src_endpoint": 1..240, "cluster_id":"0x0006", "dst_device_uid":"0x...", "dst_endpoint": 1..240 }`
+  - color xy (device): `{ "type":"zigbee", "cmd":"color.move_to_color_xy", "device_uid":"0x...", "endpoint": 1, "x": 0..65535, "y": 0..65535, "transition_ms": 0..60000 }`
+  - color xy (group): `{ "type":"zigbee", "cmd":"color.move_to_color_xy", "group_id":"0x0003", "x": 0..65535, "y": 0..65535, "transition_ms": 0..60000 }`
+  - color temp (device): `{ "type":"zigbee", "cmd":"color.move_to_color_temperature", "device_uid":"0x...", "endpoint": 1, "mireds": 1..1000, "transition_ms": 0..60000 }`
+  - color temp (group): `{ "type":"zigbee", "cmd":"color.move_to_color_temperature", "group_id":"0x0003", "mireds": 1..1000, "transition_ms": 0..60000 }`
 
 ### Запланировано (следующий шаг “укрепления”)
 Расширять компиляцию действий (не меняя UI‑JSON формат) на:
-- color control (device/group): `color.move_to_color_xy`, `color.move_to_color_temperature`
 - “management” действия: permit join, leave/kick, mgmt bind table readback (как инструменты админки)

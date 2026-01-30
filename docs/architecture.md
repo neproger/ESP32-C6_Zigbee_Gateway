@@ -435,8 +435,8 @@ Zigbee already has:
   - bind/unbind (ZDO)
 
 ### Уже есть в `gw_zigbee`, но компилятор пока не умеет “съедать” это из rules
-- groupcast: `groups.color_xy`, `groups.color_temp`
-- color: `devices.color_xy`, `devices.color_temp`
+Пока не поддержано (следующий шаг):
+- management primitives как actions: `permit_join`, `leave/kick`, `mgmt_bind_table` (как инструменты админки/диагностики)
 - цвет: `devices.color_xy`, `devices.color_temp`
 
 Идея следующего шага “укрепления” gateway: расширять compiler/executor так, чтобы правила могли вызывать эти стандартные

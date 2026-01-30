@@ -73,6 +73,10 @@ esp_err_t gw_zigbee_scene_recall(uint16_t group_id, uint8_t scene_id);
 esp_err_t gw_zigbee_bind(const gw_device_uid_t *src_uid, uint8_t src_endpoint, uint16_t cluster_id, const gw_device_uid_t *dst_uid, uint8_t dst_endpoint);
 esp_err_t gw_zigbee_unbind(const gw_device_uid_t *src_uid, uint8_t src_endpoint, uint16_t cluster_id, const gw_device_uid_t *dst_uid, uint8_t dst_endpoint);
 
+// Management / diagnostics primitives.
+// Request a remote device's APS binding table (Mgmt_Bind_req). Results are published via event bus.
+esp_err_t gw_zigbee_binding_table_req(const gw_device_uid_t *uid, uint8_t start_index);
+
 #ifdef __cplusplus
 }
 #endif

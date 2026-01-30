@@ -517,6 +517,32 @@ esp_err_t gw_action_exec_compiled(const gw_auto_compiled_t *compiled,
         const char *uid_s = strtab_at(compiled, action->uid_off);
         gw_device_uid_t uid = {0};
         strlcpy(uid.uid, uid_s, sizeof(uid.uid));
+
+        if (strcmp(cmd, "color.move_to_color_xy") == 0) {
+            if (action->arg0_u32 > 65535 || action->arg1_u32 > 65535) {
+                set_err(err, err_size, "bad x/y");
+                return ESP_ERR_INVALID_ARG;
+            }
+            if (action->arg2_u32 > 60000) {
+                set_err(err, err_size, "bad transition_ms");
+                return ESP_ERR_INVALID_ARG;
+            }
+            gw_zigbee_color_xy_t p = {.x = (uint16_t)action->arg0_u32, .y = (uint16_t)action->arg1_u32, .transition_ms = (uint16_t)action->arg2_u32};
+            return gw_zigbee_color_move_to_xy(&uid, action->endpoint, p);
+        }
+        if (strcmp(cmd, "color.move_to_color_temperature") == 0) {
+            if (action->arg0_u32 < 1 || action->arg0_u32 > 1000) {
+                set_err(err, err_size, "bad mireds");
+                return ESP_ERR_INVALID_ARG;
+            }
+            if (action->arg1_u32 > 60000) {
+                set_err(err, err_size, "bad transition_ms");
+                return ESP_ERR_INVALID_ARG;
+            }
+            gw_zigbee_color_temp_t p = {.mireds = (uint16_t)action->arg0_u32, .transition_ms = (uint16_t)action->arg1_u32};
+            return gw_zigbee_color_move_to_temp(&uid, action->endpoint, p);
+        }
+
         return gw_action_exec_compiled_zigbee(cmd,
                                              &uid,
                                              action->endpoint,
@@ -558,6 +584,32 @@ esp_err_t gw_action_exec_compiled(const gw_auto_compiled_t *compiled,
             }
             gw_zigbee_level_t p = {.level = (uint8_t)action->arg0_u32, .transition_ms = (uint16_t)action->arg1_u32};
             return gw_zigbee_group_level_move_to_level(group_id, p);
+        }
+
+        if (strcmp(cmd, "color.move_to_color_xy") == 0) {
+            if (action->arg0_u32 > 65535 || action->arg1_u32 > 65535) {
+                set_err(err, err_size, "bad x/y");
+                return ESP_ERR_INVALID_ARG;
+            }
+            if (action->arg2_u32 > 60000) {
+                set_err(err, err_size, "bad transition_ms");
+                return ESP_ERR_INVALID_ARG;
+            }
+            gw_zigbee_color_xy_t p = {.x = (uint16_t)action->arg0_u32, .y = (uint16_t)action->arg1_u32, .transition_ms = (uint16_t)action->arg2_u32};
+            return gw_zigbee_group_color_move_to_xy(group_id, p);
+        }
+
+        if (strcmp(cmd, "color.move_to_color_temperature") == 0) {
+            if (action->arg0_u32 < 1 || action->arg0_u32 > 1000) {
+                set_err(err, err_size, "bad mireds");
+                return ESP_ERR_INVALID_ARG;
+            }
+            if (action->arg1_u32 > 60000) {
+                set_err(err, err_size, "bad transition_ms");
+                return ESP_ERR_INVALID_ARG;
+            }
+            gw_zigbee_color_temp_t p = {.mireds = (uint16_t)action->arg0_u32, .transition_ms = (uint16_t)action->arg1_u32};
+            return gw_zigbee_group_color_move_to_temp(group_id, p);
         }
 
         set_err(err, err_size, "unsupported group cmd");

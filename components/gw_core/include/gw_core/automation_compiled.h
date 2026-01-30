@@ -210,11 +210,13 @@ typedef enum {
     GW_AUTO_ACT_GROUP = 2,
     GW_AUTO_ACT_SCENE = 3,
     GW_AUTO_ACT_BIND = 4,
+    GW_AUTO_ACT_MGMT = 5,
 } gw_auto_act_kind_t;
 
 // gw_auto_bin_action_v2_t.flags
 typedef enum {
     GW_AUTO_ACT_FLAG_UNBIND = 1 << 0, // BIND: unbind instead of bind
+    GW_AUTO_ACT_FLAG_REJOIN = 1 << 1, // MGMT leave: request rejoin
 } gw_auto_act_flag_t;
 
 typedef struct {

@@ -9,8 +9,6 @@
 #include "cJSON.h"
 #include "esp_log.h"
 
-static const char *TAG = "gw_auto_bin";
-
 #define MAGIC_GWAR 0x52415747u // 'GWAR'
 
 static void set_err(char *out, size_t out_size, const char *msg)
@@ -498,6 +496,45 @@ static esp_err_t compile_one(const char *json, gw_auto_compiled_t *out, char *er
                 uint32_t tr = parse_u32_any(tr_j, &ok_tr);
                 acts[i].arg0_u32 = lvl;
                 acts[i].arg1_u32 = ok_tr ? tr : 0;
+            } else if (strcmp(cmd, "color.move_to_color_xy") == 0) {
+                const cJSON *x_j = cJSON_GetObjectItemCaseSensitive((cJSON *)a, "x");
+                const cJSON *y_j = cJSON_GetObjectItemCaseSensitive((cJSON *)a, "y");
+                const cJSON *tr_j = cJSON_GetObjectItemCaseSensitive((cJSON *)a, "transition_ms");
+
+                bool ok_x = false;
+                bool ok_y = false;
+                uint32_t x = parse_u32_any(x_j, &ok_x);
+                uint32_t y = parse_u32_any(y_j, &ok_y);
+                if (!ok_x || x > 65535) {
+                    set_err(err, err_size, "bad action.x");
+                    rc = ESP_ERR_INVALID_ARG;
+                    goto done_alloc;
+                }
+                if (!ok_y || y > 65535) {
+                    set_err(err, err_size, "bad action.y");
+                    rc = ESP_ERR_INVALID_ARG;
+                    goto done_alloc;
+                }
+                bool ok_tr = false;
+                uint32_t tr = parse_u32_any(tr_j, &ok_tr);
+                acts[i].arg0_u32 = x;
+                acts[i].arg1_u32 = y;
+                acts[i].arg2_u32 = ok_tr ? tr : 0;
+            } else if (strcmp(cmd, "color.move_to_color_temperature") == 0) {
+                const cJSON *m_j = cJSON_GetObjectItemCaseSensitive((cJSON *)a, "mireds");
+                const cJSON *tr_j = cJSON_GetObjectItemCaseSensitive((cJSON *)a, "transition_ms");
+
+                bool ok_m = false;
+                uint32_t mireds = parse_u32_any(m_j, &ok_m);
+                if (!ok_m || mireds < 1 || mireds > 1000) {
+                    set_err(err, err_size, "bad action.mireds");
+                    rc = ESP_ERR_INVALID_ARG;
+                    goto done_alloc;
+                }
+                bool ok_tr = false;
+                uint32_t tr = parse_u32_any(tr_j, &ok_tr);
+                acts[i].arg0_u32 = mireds;
+                acts[i].arg1_u32 = ok_tr ? tr : 0;
             }
             continue;
         }
@@ -535,6 +572,45 @@ static esp_err_t compile_one(const char *json, gw_auto_compiled_t *out, char *er
             bool ok_tr = false;
             uint32_t tr = parse_u32_any(tr_j, &ok_tr);
             acts[i].arg0_u32 = lvl;
+            acts[i].arg1_u32 = ok_tr ? tr : 0;
+        } else if (strcmp(cmd, "color.move_to_color_xy") == 0) {
+            const cJSON *x_j = cJSON_GetObjectItemCaseSensitive((cJSON *)a, "x");
+            const cJSON *y_j = cJSON_GetObjectItemCaseSensitive((cJSON *)a, "y");
+            const cJSON *tr_j = cJSON_GetObjectItemCaseSensitive((cJSON *)a, "transition_ms");
+
+            bool ok_x = false;
+            bool ok_y = false;
+            uint32_t x = parse_u32_any(x_j, &ok_x);
+            uint32_t y = parse_u32_any(y_j, &ok_y);
+            if (!ok_x || x > 65535) {
+                set_err(err, err_size, "bad action.x");
+                rc = ESP_ERR_INVALID_ARG;
+                goto done_alloc;
+            }
+            if (!ok_y || y > 65535) {
+                set_err(err, err_size, "bad action.y");
+                rc = ESP_ERR_INVALID_ARG;
+                goto done_alloc;
+            }
+            bool ok_tr = false;
+            uint32_t tr = parse_u32_any(tr_j, &ok_tr);
+            acts[i].arg0_u32 = x;
+            acts[i].arg1_u32 = y;
+            acts[i].arg2_u32 = ok_tr ? tr : 0;
+        } else if (strcmp(cmd, "color.move_to_color_temperature") == 0) {
+            const cJSON *m_j = cJSON_GetObjectItemCaseSensitive((cJSON *)a, "mireds");
+            const cJSON *tr_j = cJSON_GetObjectItemCaseSensitive((cJSON *)a, "transition_ms");
+
+            bool ok_m = false;
+            uint32_t mireds = parse_u32_any(m_j, &ok_m);
+            if (!ok_m || mireds < 1 || mireds > 1000) {
+                set_err(err, err_size, "bad action.mireds");
+                rc = ESP_ERR_INVALID_ARG;
+                goto done_alloc;
+            }
+            bool ok_tr = false;
+            uint32_t tr = parse_u32_any(tr_j, &ok_tr);
+            acts[i].arg0_u32 = mireds;
             acts[i].arg1_u32 = ok_tr ? tr : 0;
         }
     }
@@ -589,19 +665,6 @@ void gw_auto_compiled_free(gw_auto_compiled_t *c)
     free(c->actions);
     free(c->strings);
     *c = (gw_auto_compiled_t){0};
-}
-
-static void le_write_u32(uint8_t *p, uint32_t v)
-{
-    p[0] = (uint8_t)(v & 0xff);
-    p[1] = (uint8_t)((v >> 8) & 0xff);
-    p[2] = (uint8_t)((v >> 16) & 0xff);
-    p[3] = (uint8_t)((v >> 24) & 0xff);
-}
-
-static uint32_t le_read_u32(const uint8_t *p)
-{
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
 esp_err_t gw_auto_compiled_serialize(const gw_auto_compiled_t *c, uint8_t **out_buf, size_t *out_len)
