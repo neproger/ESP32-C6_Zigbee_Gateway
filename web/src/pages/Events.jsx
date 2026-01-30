@@ -291,7 +291,8 @@ export default function Events() {
 			{status ? <div className="status">{status}</div> : null}
 
 			<div ref={scrollRef} className="card scroll height-100">
-				<table >
+				<div className="table-wrap">
+					<table>
 					<thead>
 						<tr>
 									<th>ID</th>
@@ -348,7 +349,8 @@ export default function Events() {
 							))
 						)}
 					</tbody>
-				</table>
+					</table>
+				</div>
 			</div>
 		</div>
 	)

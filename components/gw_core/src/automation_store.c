@@ -43,7 +43,13 @@ static esp_err_t save_to_nvs(void)
     nvs_handle_t h;
     esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
     if (err != ESP_OK) return err;
+
     err = nvs_set_blob(h, NVS_KEY, &s_store, sizeof(s_store));
+    // If space is tight/fragmented, try erasing the key and writing again.
+    if (err == ESP_ERR_NVS_NOT_ENOUGH_SPACE || err == ESP_ERR_NVS_NO_FREE_PAGES) {
+        (void)nvs_erase_key(h, NVS_KEY);
+        err = nvs_set_blob(h, NVS_KEY, &s_store, sizeof(s_store));
+    }
     if (err == ESP_OK) {
         err = nvs_commit(h);
     }

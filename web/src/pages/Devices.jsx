@@ -117,48 +117,50 @@ export default function Devices() {
 			{status ? <div className="status">{status}</div> : null}
 
 			<div className="card">
-				<table>
-					<thead>
-						<tr>
-							<th>UID</th>
-							<th>Name</th>
-							<th>Short</th>
-							<th>Caps</th>
-							<th>Actions</th>
-						</tr>
-					</thead>
-					<tbody>
-						{sortedDevices.length === 0 ? (
+				<div className="table-wrap">
+					<table>
+						<thead>
 							<tr>
-								<td colSpan={5} className="muted">
-									No devices yet. Click "Scan new devices (permit join)", then pair a Zigbee device.
-								</td>
+								<th>UID</th>
+								<th>Name</th>
+								<th>Short</th>
+								<th>Caps</th>
+								<th>Actions</th>
 							</tr>
-						) : (
-							sortedDevices.map((d) => (
-								<tr key={String(d?.device_uid ?? Math.random())}>
-									<td>
-										<Link to={`/devices/${encodeURIComponent(String(d?.device_uid ?? ''))}`}>
-											<code>{String(d?.device_uid ?? '')}</code>
-										</Link>
-									</td>
-									<td>{String(d?.name ?? '')}</td>
-									<td>
-										<code>{shortToHex(d?.short_addr)}</code>
-									</td>
-									<td>{capsToText(d)}</td>
-									<td>
-										<div className="row">
-											<button onClick={() => renameDevice(d?.device_uid, d?.name)}>Rename</button>
-											<button onClick={() => removeDevice(d?.device_uid, false)}>Forget</button>
-											<button onClick={() => removeDevice(d?.device_uid, true)}>Forget + kick</button>
-										</div>
+						</thead>
+						<tbody>
+							{sortedDevices.length === 0 ? (
+								<tr>
+									<td colSpan={5} className="muted">
+										No devices yet. Click "Scan new devices (permit join)", then pair a Zigbee device.
 									</td>
 								</tr>
-							))
-						)}
-					</tbody>
-				</table>
+							) : (
+								sortedDevices.map((d) => (
+									<tr key={String(d?.device_uid ?? Math.random())}>
+										<td>
+											<Link to={`/devices/${encodeURIComponent(String(d?.device_uid ?? ''))}`}>
+												<code>{String(d?.device_uid ?? '')}</code>
+											</Link>
+										</td>
+										<td>{String(d?.name ?? '')}</td>
+										<td>
+											<code>{shortToHex(d?.short_addr)}</code>
+										</td>
+										<td>{capsToText(d)}</td>
+										<td>
+											<div className="row">
+												<button onClick={() => renameDevice(d?.device_uid, d?.name)}>Rename</button>
+												<button onClick={() => removeDevice(d?.device_uid, false)}>Forget</button>
+												<button onClick={() => removeDevice(d?.device_uid, true)}>Forget + kick</button>
+											</div>
+										</td>
+									</tr>
+								))
+							)}
+						</tbody>
+					</table>
+				</div>
 			</div>
 		</div>
 	)

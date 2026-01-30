@@ -3,6 +3,7 @@ import './App.css'
 import Devices from './pages/Devices.jsx'
 import Device from './pages/Device.jsx'
 import Events from './pages/Events.jsx'
+import Automations from './pages/Automations.jsx'
 
 function App() {
   return (
@@ -15,6 +16,9 @@ function App() {
         <NavLink to="/events" className={({ isActive }) => (isActive ? 'navlink active' : 'navlink')}>
           Events
         </NavLink>
+        <NavLink to="/automations" className={({ isActive }) => (isActive ? 'navlink active' : 'navlink')}>
+          Automations
+        </NavLink>
       </nav>
 
       <main className="content">
@@ -23,6 +27,7 @@ function App() {
           <Route path="/devices" element={<Devices />} />
           <Route path="/devices/:uid" element={<Device />} />
           <Route path="/events" element={<Events />} />
+          <Route path="/automations" element={<Automations />} />
           <Route path="*" element={<Navigate to="/devices" replace />} />
         </Routes>
       </main>

@@ -10,6 +10,7 @@
   gap: 12px;
   padding: 12px 16px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  flex-wrap: wrap;
 }
 
 .brand {
@@ -125,4 +126,71 @@ code {
   background: rgba(255, 255, 255, 0.06);
   border: 1px solid rgba(255, 255, 255, 0.08);
   font-size: 14px;
+}
+
+.table-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.table-wrap > table {
+  min-width: 720px;
+}
+
+.split {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+@media (max-width: 640px) {
+  .content {
+    padding: 12px;
+  }
+
+  .brand {
+    width: 100%;
+    margin-right: 0;
+  }
+
+  .navlink {
+    padding: 6px 8px;
+  }
+
+  .split {
+    flex-direction: column;
+  }
+
+  .split > * {
+    width: 100% !important;
+    min-width: 0 !important;
+  }
+
+  input,
+  select,
+  textarea,
+  button {
+    font-size: 16px;
+  }
+
+  input,
+  select,
+  textarea {
+    min-width: 0 !important;
+    max-width: 100%;
+  }
+
+  th,
+  td {
+    padding: 8px 10px;
+    font-size: 13px;
+  }
+
+  .card.scroll {
+    max-height: 75vh;
+  }
+
+  .table-wrap > table {
+    min-width: 640px;
+  }
 }

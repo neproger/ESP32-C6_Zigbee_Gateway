@@ -261,184 +261,188 @@ export default function Device() {
 			{status ? <div className="status">{status}</div> : null}
 
 			<div className="card">
-				<table>
-					<thead>
-						<tr>
-							<th>Endpoint</th>
-							<th>Kind</th>
-							<th>Profile</th>
-							<th>Device</th>
-							<th>Controls</th>
-							<th>Accepts</th>
-							<th>Emits</th>
-							<th>Reports</th>
-							<th>In clusters</th>
-							<th>Out clusters</th>
-						</tr>
-					</thead>
-					<tbody>
-						{sortedEndpoints.length === 0 ? (
+				<div className="table-wrap">
+					<table>
+						<thead>
 							<tr>
-								<td colSpan={10} className="muted">
-									No endpoints discovered yet.
-								</td>
+								<th>Endpoint</th>
+								<th>Kind</th>
+								<th>Profile</th>
+								<th>Device</th>
+								<th>Controls</th>
+								<th>Accepts</th>
+								<th>Emits</th>
+								<th>Reports</th>
+								<th>In clusters</th>
+								<th>Out clusters</th>
 							</tr>
-						) : (
-							sortedEndpoints.map((e, index) => (
-								<tr key={index}>
-									<td>
-										<code>{String(e?.endpoint ?? '')}</code>
-									</td>
-									<td className="muted">{String(e?.kind ?? '')}</td>
-									<td className="muted">
-										{hex16(e?.profile_id)}
-										{describeProfile(e?.profile_id)?.name ? ` (${describeProfile(e?.profile_id).name})` : ''}
-									</td>
-									<td className="muted">
-										{hex16(e?.device_id)}
-										{describeDeviceId(e?.device_id)?.name ? ` (${describeDeviceId(e?.device_id).name})` : ''}
-									</td>
-									<td>
-										<div className="row" style={{ flexWrap: 'wrap', gap: 8 }}>
-											{hasAccept(e, 'onoff.') ? (
-												<>
-													<label className="muted" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-														<input
-															type="checkbox"
-															checked={Boolean(state?.onoff)}
-															onChange={(ev) => sendOnOff(Number(e?.endpoint ?? 1), ev?.target?.checked ? 'on' : 'off')}
-														/>
-														On
-													</label>
-													<button onClick={() => sendOnOff(Number(e?.endpoint ?? 1), 'toggle')}>Toggle</button>
-												</>
-											) : null}
-
-											{hasAccept(e, 'level.move_to_level') || hasAccept(e, 'level.') ? (
-												<>
-													<input
-														type="range"
-														min={0}
-														max={254}
-														value={Number(levelByEndpoint.get(Number(e?.endpoint ?? 0)) ?? 0)}
-														onChange={(ev) => {
-															const v = Number(ev?.target?.value ?? 0)
-															setLevelByEndpoint((prev) => {
-																const next = new Map(prev)
-																next.set(Number(e?.endpoint ?? 0), v)
-																return next
-															})
-														}}
-													/>
-													<button onClick={() => sendLevel(Number(e?.endpoint ?? 1))}>Set</button>
-												</>
-											) : null}
-
-											{hasAccept(e, 'color.move_to_color_xy') || hasAccept(e, 'color.') ? (
-												<>
-													<input
-														type="color"
-														value={String(colorByEndpoint.get(Number(e?.endpoint ?? 0)) ?? '#ffffff')}
-														onChange={(ev) => {
-															const v = String(ev?.target?.value ?? '#ffffff')
-															setColorByEndpoint((prev) => {
-																const next = new Map(prev)
-																next.set(Number(e?.endpoint ?? 0), v)
-																return next
-															})
-														}}
-														title="Color (xy)"
-													/>
-													<button onClick={() => sendColor(Number(e?.endpoint ?? 1))}>Set</button>
-												</>
-											) : null}
-
-											{hasAccept(e, 'color.move_to_color_temperature') ? (
-												<>
-													<input
-														type="range"
-														min={2000}
-														max={6500}
-														step={100}
-														value={Number(tempKByEndpoint.get(Number(e?.endpoint ?? 0)) ?? 3000)}
-														onChange={(ev) => {
-															const v = Number(ev?.target?.value ?? 3000)
-															setTempKByEndpoint((prev) => {
-																const next = new Map(prev)
-																next.set(Number(e?.endpoint ?? 0), v)
-																return next
-															})
-														}}
-														title="Color temperature (K)"
-													/>
-													<button onClick={() => sendTemp(Number(e?.endpoint ?? 1))}>Set</button>
-												</>
-											) : null}
-										</div>
-									</td>
-									<td className="mono" style={{ flexWrap: 'wrap' }}>{listToText(e?.accepts)}</td>
-									<td className="mono" style={{ flexWrap: 'wrap' }}>{listToText(e?.emits)}</td>
-									<td className="mono">{listToText(e?.reports)}</td>
-									<td className="mono">
-										{Array.isArray(e?.in_clusters)
-											? e.in_clusters
-												.map((c) => <div key={c}>{`${hex16(c)}${describeCluster(c)?.name ? ` ${describeCluster(c).name}` : ''}`}</div>)
-											: ''}
-									</td>
-									<td className="mono">
-										{Array.isArray(e?.out_clusters)
-											? e.out_clusters
-												.map((c) => <div key={c}>{`${hex16(c)}${describeCluster(c)?.name ? ` ${describeCluster(c).name}` : ''}`}</div>)
-											: ''}
+						</thead>
+						<tbody>
+							{sortedEndpoints.length === 0 ? (
+								<tr>
+									<td colSpan={10} className="muted">
+										No endpoints discovered yet.
 									</td>
 								</tr>
-							))
-						)}
-					</tbody>
-				</table>
+							) : (
+								sortedEndpoints.map((e, index) => (
+									<tr key={index}>
+										<td>
+											<code>{String(e?.endpoint ?? '')}</code>
+										</td>
+										<td className="muted">{String(e?.kind ?? '')}</td>
+										<td className="muted">
+											{hex16(e?.profile_id)}
+											{describeProfile(e?.profile_id)?.name ? ` (${describeProfile(e?.profile_id).name})` : ''}
+										</td>
+										<td className="muted">
+											{hex16(e?.device_id)}
+											{describeDeviceId(e?.device_id)?.name ? ` (${describeDeviceId(e?.device_id).name})` : ''}
+										</td>
+										<td>
+											<div className="row" style={{ flexWrap: 'wrap', gap: 8 }}>
+												{hasAccept(e, 'onoff.') ? (
+													<>
+														<label className="muted" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+															<input
+																type="checkbox"
+																checked={Boolean(state?.onoff)}
+																onChange={(ev) => sendOnOff(Number(e?.endpoint ?? 1), ev?.target?.checked ? 'on' : 'off')}
+															/>
+															On
+														</label>
+														<button onClick={() => sendOnOff(Number(e?.endpoint ?? 1), 'toggle')}>Toggle</button>
+													</>
+												) : null}
+
+												{hasAccept(e, 'level.move_to_level') || hasAccept(e, 'level.') ? (
+													<>
+														<input
+															type="range"
+															min={0}
+															max={254}
+															value={Number(levelByEndpoint.get(Number(e?.endpoint ?? 0)) ?? 0)}
+															onChange={(ev) => {
+																const v = Number(ev?.target?.value ?? 0)
+																setLevelByEndpoint((prev) => {
+																	const next = new Map(prev)
+																	next.set(Number(e?.endpoint ?? 0), v)
+																	return next
+																})
+															}}
+														/>
+														<button onClick={() => sendLevel(Number(e?.endpoint ?? 1))}>Set</button>
+													</>
+												) : null}
+
+												{hasAccept(e, 'color.move_to_color_xy') || hasAccept(e, 'color.') ? (
+													<>
+														<input
+															type="color"
+															value={String(colorByEndpoint.get(Number(e?.endpoint ?? 0)) ?? '#ffffff')}
+															onChange={(ev) => {
+																const v = String(ev?.target?.value ?? '#ffffff')
+																setColorByEndpoint((prev) => {
+																	const next = new Map(prev)
+																	next.set(Number(e?.endpoint ?? 0), v)
+																	return next
+																})
+															}}
+															title="Color (xy)"
+														/>
+														<button onClick={() => sendColor(Number(e?.endpoint ?? 1))}>Set</button>
+													</>
+												) : null}
+
+												{hasAccept(e, 'color.move_to_color_temperature') ? (
+													<>
+														<input
+															type="range"
+															min={2000}
+															max={6500}
+															step={100}
+															value={Number(tempKByEndpoint.get(Number(e?.endpoint ?? 0)) ?? 3000)}
+															onChange={(ev) => {
+																const v = Number(ev?.target?.value ?? 3000)
+																setTempKByEndpoint((prev) => {
+																	const next = new Map(prev)
+																	next.set(Number(e?.endpoint ?? 0), v)
+																	return next
+																})
+															}}
+															title="Color temperature (K)"
+														/>
+														<button onClick={() => sendTemp(Number(e?.endpoint ?? 1))}>Set</button>
+													</>
+												) : null}
+											</div>
+										</td>
+										<td className="mono" style={{ flexWrap: 'wrap' }}>{listToText(e?.accepts)}</td>
+										<td className="mono" style={{ flexWrap: 'wrap' }}>{listToText(e?.emits)}</td>
+										<td className="mono">{listToText(e?.reports)}</td>
+										<td className="mono">
+											{Array.isArray(e?.in_clusters)
+												? e.in_clusters
+													.map((c) => <div key={c}>{`${hex16(c)}${describeCluster(c)?.name ? ` ${describeCluster(c).name}` : ''}`}</div>)
+												: ''}
+										</td>
+										<td className="mono">
+											{Array.isArray(e?.out_clusters)
+												? e.out_clusters
+													.map((c) => <div key={c}>{`${hex16(c)}${describeCluster(c)?.name ? ` ${describeCluster(c).name}` : ''}`}</div>)
+												: ''}
+										</td>
+									</tr>
+								))
+							)}
+						</tbody>
+					</table>
+				</div>
 			</div>
 
 			<div style={{ height: 12 }} />
 
 			<div className="card">
-				<table>
-					<thead>
-						<tr>
-							<th>Endpoint</th>
-							<th>Cluster</th>
-							<th>Attr</th>
-							<th>Value</th>
-							<th>ts_ms</th>
-						</tr>
-					</thead>
-					<tbody>
-						{sortedSensors.length === 0 ? (
+				<div className="table-wrap">
+					<table>
+						<thead>
 							<tr>
-								<td colSpan={5} className="muted">
-									No sensor values yet (wait for reports or initial reads).
-								</td>
+								<th>Endpoint</th>
+								<th>Cluster</th>
+								<th>Attr</th>
+								<th>Value</th>
+								<th>ts_ms</th>
 							</tr>
-						) : (
-							sortedSensors.map((s, idx) => (
-								<tr key={`${idx}-${s?.endpoint}-${s?.cluster_id}-${s?.attr_id}`}>
-									<td>
-										<code>{String(s?.endpoint ?? '')}</code>
+						</thead>
+						<tbody>
+							{sortedSensors.length === 0 ? (
+								<tr>
+									<td colSpan={5} className="muted">
+										No sensor values yet (wait for reports or initial reads).
 									</td>
-									<td className="muted">
-										{hex16(s?.cluster_id)}
-										{describeCluster(s?.cluster_id)?.name ? ` (${describeCluster(s?.cluster_id).name})` : ''}
-									</td>
-									<td className="muted">
-										{hex16(s?.attr_id)}
-										{describeAttr(s?.cluster_id, s?.attr_id)?.name ? ` (${describeAttr(s?.cluster_id, s?.attr_id).name})` : ''}
-									</td>
-									<td className="mono">{renderSensorValue(s)}</td>
-									<td className="muted">{String(s?.ts_ms ?? '')}</td>
 								</tr>
-							))
-						)}
-					</tbody>
-				</table>
+							) : (
+								sortedSensors.map((s, idx) => (
+									<tr key={`${idx}-${s?.endpoint}-${s?.cluster_id}-${s?.attr_id}`}>
+										<td>
+											<code>{String(s?.endpoint ?? '')}</code>
+										</td>
+										<td className="muted">
+											{hex16(s?.cluster_id)}
+											{describeCluster(s?.cluster_id)?.name ? ` (${describeCluster(s?.cluster_id).name})` : ''}
+										</td>
+										<td className="muted">
+											{hex16(s?.attr_id)}
+											{describeAttr(s?.cluster_id, s?.attr_id)?.name ? ` (${describeAttr(s?.cluster_id, s?.attr_id).name})` : ''}
+										</td>
+										<td className="mono">{renderSensorValue(s)}</td>
+										<td className="muted">{String(s?.ts_ms ?? '')}</td>
+									</tr>
+								))
+							)}
+						</tbody>
+					</table>
+				</div>
 			</div>
 		</div>
 	)

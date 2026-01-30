@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "cJSON.h"
+#include "esp_err.h"
 #include "esp_log.h"
 
 #include "gw_core/action_exec.h"
@@ -387,9 +388,17 @@ static void ws_handle_req(int fd, cJSON *root)
         strlcpy(a.json, json_j->valuestring, sizeof(a.json));
         a.enabled = cJSON_IsBool(enabled_j) ? cJSON_IsTrue(enabled_j) : true;
 
+        // Help the UI: fail fast if truncation would happen.
+        if (strlen(json_j->valuestring) >= sizeof(a.json)) {
+            ws_send_rsp(fd, id, false, "json too long (truncate would occur)");
+            return;
+        }
+
         esp_err_t err = gw_automation_store_put(&a);
         if (err != ESP_OK) {
-            ws_send_rsp(fd, id, false, "store failed");
+            char emsg[96];
+            (void)snprintf(emsg, sizeof(emsg), "store failed: %s (0x%x)", esp_err_to_name(err), (unsigned)err);
+            ws_send_rsp(fd, id, false, emsg);
             return;
         }
         gw_event_bus_publish("automation_saved", "ws", "", 0, a.id);
