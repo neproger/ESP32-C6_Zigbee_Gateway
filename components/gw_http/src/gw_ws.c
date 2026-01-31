@@ -361,12 +361,12 @@ static void ws_handle_req(int fd, cJSON *root)
 
     if (strcmp(m->valuestring, "automations.list") == 0) {
         const size_t max_autos = 32;  // Match GW_AUTOMATION_CAP
-        gw_automation_t *autos = (gw_automation_t *)calloc(max_autos, sizeof(gw_automation_t));
-        if (!autos) {
+        gw_automation_meta_t *metas = (gw_automation_meta_t *)calloc(max_autos, sizeof(gw_automation_meta_t));
+        if (!metas) {
             ws_send_rsp(fd, id, false, "no mem");
             return;
         }
-        size_t count = gw_automation_store_list(autos, max_autos);
+        size_t count = gw_automation_store_list_meta(metas, max_autos);
         ESP_LOGI("gw_ws", "automations.list: fd=%d, count=%zu", fd, count);
 
         cJSON *o = cJSON_CreateObject();
@@ -377,38 +377,22 @@ static void ws_handle_req(int fd, cJSON *root)
         cJSON *res = cJSON_AddObjectToObject(o, "res");
         cJSON *arr = cJSON_AddArrayToObject(res, "automations");
         for (size_t i = 0; i < count; i++) {
-            const gw_automation_t *a = &autos[i];
+            const gw_automation_meta_t *a = &metas[i];
             cJSON *ja = cJSON_CreateObject();
             cJSON_AddStringToObject(ja, "id", a->id);
             cJSON_AddStringToObject(ja, "name", a->name);
             cJSON_AddBoolToObject(ja, "enabled", a->enabled);
-            cJSON_AddStringToObject(ja, "json", a->json);
+            // NOTE: The "json" field is no longer sent, this is an API change.
             cJSON_AddItemToArray(arr, ja);
         }
 
         char *s = cJSON_PrintUnformatted(o);
         if (s) {
-            size_t json_len = strlen(s);
-            ESP_LOGI("gw_ws", "automations.list: sending JSON, len=%zu bytes", json_len);
-            
-            // Log first 500 chars for inspection
-            char preview[512] = {0};
-            size_t preview_len = json_len > 500 ? 500 : json_len;
-            memcpy(preview, s, preview_len);
-            ESP_LOGI("gw_ws", "JSON preview: %s%s", preview, preview_len < json_len ? "..." : "");
-            
-            if (json_len > 4096) {
-                ESP_LOGW("gw_ws", "automations.list: JSON response very large (%zu bytes), may be truncated", json_len);
-            }
-            
-            esp_err_t send_err = ws_send_json_async(fd, s);
-            if (send_err != ESP_OK) {
-                ESP_LOGW("gw_ws", "automations.list: ws_send_json_async failed: %s", esp_err_to_name(send_err));
-            }
+            (void)ws_send_json_async(fd, s);
             cJSON_free(s);
         }
         cJSON_Delete(o);
-        free(autos);
+        free(metas);
         return;
     }
 
@@ -418,8 +402,9 @@ static void ws_handle_req(int fd, cJSON *root)
         cJSON *name_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "name") : NULL;
         cJSON *enabled_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "enabled") : NULL;
         cJSON *json_j = cJSON_IsObject(p) ? cJSON_GetObjectItemCaseSensitive(p, "json") : NULL;
+
         if (!cJSON_IsString(id_j) || !id_j->valuestring || id_j->valuestring[0] == '\0') {
-            ws_send_rsp(fd, id, false, "missing id");
+            ws_send_rsp(fd, id, false, "missing or empty id");
             return;
         }
         if (!cJSON_IsString(name_j) || !name_j->valuestring) {
@@ -431,41 +416,23 @@ static void ws_handle_req(int fd, cJSON *root)
             return;
         }
 
-        gw_automation_t a = {0};
-        strlcpy(a.id, id_j->valuestring, sizeof(a.id));
-        strlcpy(a.name, name_j->valuestring, sizeof(a.name));
-        strlcpy(a.json, json_j->valuestring, sizeof(a.json));
-        a.enabled = cJSON_IsBool(enabled_j) ? cJSON_IsTrue(enabled_j) : true;
+        const char *automation_id = id_j->valuestring;
+        const char *automation_name = name_j->valuestring;
+        const char *automation_json = json_j->valuestring;
+        bool enabled = cJSON_IsBool(enabled_j) ? cJSON_IsTrue(enabled_j) : true;
 
-        // Help the UI: fail fast if truncation would happen.
-        if (strlen(json_j->valuestring) >= sizeof(a.json)) {
-            ws_send_rsp(fd, id, false, "json too long (truncate would occur)");
-            return;
-        }
+        esp_err_t err = gw_automation_store_put(automation_id, automation_name, enabled, automation_json);
 
-        esp_err_t err = gw_automation_store_put(&a);
         if (err != ESP_OK) {
             char emsg[128];
-            if (err == ESP_ERR_NO_MEM) {
-                // Try to cleanup orphaned .gwar files and retry once
-                ESP_LOGW("gw_ws", "automations.put: storage full, attempting cleanup of orphaned files");
-                gw_automation_store_cleanup_orphaned();
-                
-                // Retry once after cleanup
-                err = gw_automation_store_put(&a);
-                if (err == ESP_OK) {
-                    gw_event_bus_publish("automation_saved", "ws", "", 0, a.id);
-                    ws_send_rsp(fd, id, true, NULL);
-                    return;
-                }
-                (void)snprintf(emsg, sizeof(emsg), "automation storage full (max %u); delete unused automations first", 32);
-            } else {
-                (void)snprintf(emsg, sizeof(emsg), "store failed: %s (0x%x)", esp_err_to_name(err), (unsigned)err);
-            }
+            snprintf(emsg, sizeof(emsg), "store failed: %s (0x%x)", esp_err_to_name(err), (unsigned)err);
             ws_send_rsp(fd, id, false, emsg);
             return;
         }
-        gw_event_bus_publish("automation_saved", "ws", "", 0, a.id);
+
+        // Publish an event to notify other modules (like the rules engine) that an automation has changed.
+        // Although the rules engine is now stateless, this event is useful for logging and external integrations.
+        gw_event_bus_publish("automation_saved", "ws", "", 0, automation_id);
         ws_send_rsp(fd, id, true, NULL);
         return;
     }
